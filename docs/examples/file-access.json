@@ -1,0 +1,54 @@
+{
+  "id": "pol-file-access",
+  "tenant_id": "ba62a53f-afa9-427d-9d91-c7987bc5662e",
+  "version": "2026-07-01",
+  "statements": [
+    {
+      "sid": "read-active-files",
+      "effect": "allow",
+      "actions": [
+        "file:getFile",
+        "file:listFiles",
+        "file:getFileContent",
+        "file:search"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:file::file:**"
+      ],
+      "conditions": {
+        "StringEquals": {
+          "status": "active"
+        }
+      }
+    },
+    {
+      "sid": "write-projectx-unless-restricted",
+      "effect": "allow",
+      "actions": [
+        "file:createFile",
+        "file:updateFile",
+        "file:updateFileContent",
+        "file:patchFile",
+        "file:deleteFile"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:file::file:projectx/**"
+      ],
+      "conditions": {
+        "StringNotEquals": {
+          "tag.classification": "restricted"
+        }
+      }
+    },
+    {
+      "sid": "protect-projectx-secrets",
+      "effect": "deny",
+      "actions": [
+        "*"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:file::file:projectx/secrets/**"
+      ]
+    }
+  ]
+}

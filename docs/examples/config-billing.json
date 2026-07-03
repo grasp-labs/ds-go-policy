@@ -1,0 +1,53 @@
+{
+  "id": "pol-config-billing",
+  "tenant_id": "ba62a53f-afa9-427d-9d91-c7987bc5662e",
+  "version": "2026-07-01",
+  "statements": [
+    {
+      "sid": "billing-read",
+      "effect": "allow",
+      "actions": [
+        "config:listPlan",
+        "config:getPlanById",
+        "config:listPrice",
+        "config:getPriceById",
+        "config:listProduct",
+        "config:getProductById",
+        "config:listInvoice",
+        "config:getInvoiceById",
+        "config:listSubscription",
+        "config:getSubscriptionById"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:config::*:*"
+      ]
+    },
+    {
+      "sid": "plan-write-staging-only",
+      "effect": "allow",
+      "actions": [
+        "config:createPlan",
+        "config:updatePlan",
+        "config:deletePlan"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:config::plan:*"
+      ],
+      "conditions": {
+        "StringEquals": {
+          "environment": "staging"
+        }
+      }
+    },
+    {
+      "sid": "no-invoice-generation",
+      "effect": "deny",
+      "actions": [
+        "config:generateInvoice"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:config::invoice:*"
+      ]
+    }
+  ]
+}
