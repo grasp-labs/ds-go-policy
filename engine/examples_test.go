@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/grasp-labs/ds-go/policy/crn"
-	"github.com/grasp-labs/ds-go/policy/engine"
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/crn"
+	"github.com/grasp-labs/ds-go-policy/engine"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 // loadPolicy reads a policy document from docs/examples so the examples in the

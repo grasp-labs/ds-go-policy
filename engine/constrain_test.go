@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/grasp-labs/ds-go/policy/engine"
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/engine"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 const constrainTenant = "ba62a53f-afa9-427d-9d91-c7987bc5662e"

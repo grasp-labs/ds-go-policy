@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 // ErrUnknownOperator is returned by Compile when a policy uses a condition

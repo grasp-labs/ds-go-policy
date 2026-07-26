@@ -8,7 +8,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/grasp-labs/ds-go/policy/engine"
+	"github.com/grasp-labs/ds-go-policy/engine"
 )
 
 // ErrUnsupportedCondition is returned when a match carries conditions. This

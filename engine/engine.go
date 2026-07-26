@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/grasp-labs/ds-go/policy/crn"
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/crn"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 // Request context for a concrete operation.

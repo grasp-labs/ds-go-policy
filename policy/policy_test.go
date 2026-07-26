@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 func TestConditionsUnmarshal(t *testing.T) {

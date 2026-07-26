@@ -6,10 +6,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/grasp-labs/ds-go/policy/adapter/sqlfilter"
-	"github.com/grasp-labs/ds-go/policy/crn"
-	"github.com/grasp-labs/ds-go/policy/engine"
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/adapter/sqlfilter"
+	"github.com/grasp-labs/ds-go-policy/crn"
+	"github.com/grasp-labs/ds-go-policy/engine"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 const tenant = "ba62a53f-afa9-427d-9d91-c7987bc5662e"

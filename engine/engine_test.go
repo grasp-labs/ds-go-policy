@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/grasp-labs/ds-go/policy/crn"
-	"github.com/grasp-labs/ds-go/policy/engine"
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/crn"
+	"github.com/grasp-labs/ds-go-policy/engine"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 const (
