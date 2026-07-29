@@ -1,10 +1,10 @@
 # ds-go-policy
 
-Build
-[Go Report Card](https://goreportcard.com/report/github.com/grasp-labs/ds-go-policy)
-[codecov](https://codecov.io/gh/grasp-labs/ds-go-policy)
-[GitHub release](https://github.com/grasp-labs/ds-go-policy/releases)
-License
+![Build](https://github.com/grasp-labs/ds-go-policy/actions/workflows/ci.yml/badge.svg)
+[![Go Report Card](https://goreportcard.com/badge/github.com/grasp-labs/ds-go-policy)](https://goreportcard.com/report/github.com/grasp-labs/ds-go-policy)
+[![codecov](https://codecov.io/gh/grasp-labs/ds-go-policy/branch/main/graph/badge.svg)](https://codecov.io/gh/grasp-labs/ds-go-policy)
+[![GitHub release](https://img.shields.io/github/v/release/grasp-labs/ds-go-policy)](https://github.com/grasp-labs/ds-go-policy/releases)
+![License](https://img.shields.io/github/license/grasp-labs/ds-go-policy?cacheSeconds=60)
 
 A small, dependency-light IAM policy engine for Go. It answers two questions from
 the same policy documents:
@@ -110,7 +110,7 @@ statement whose context condition fails is dropped.
 *not* in the context, so they stay attached to the pattern and the adapter
 turns them into predicates via `Mapping.Conditions`.
 
-Take the file-access policy from `[docs/examples/](./docs/examples/file-access.json)`:
+Take the file-access policy from [`docs/examples/file-access.json`](./docs/examples/file-access.json):
 it allows `file:listFiles` over the whole tree where `status = "active"`, and
 denies everything under `projectx/secrets/`. Constraining it for a `listFiles`
 request yields a `WHERE` clause that narrows the query to exactly what the
@@ -241,10 +241,10 @@ service supplies in `Request.Context`.
 
 ## Examples
 
-Runnable policy documents live in `[docs/examples/](./docs/examples)`, modeled on
+Runnable policy documents live in [`docs/examples/`](./docs/examples), modeled on
 the DS-file and Config APIs. They are loaded and evaluated by the test suite, so
 they stay in sync with the implementation. See the full design contract in
-`[docs/iam-policy-contract.md](./docs/iam-policy-contract.md)`.
+[`docs/iam-policy-contract.md`](./docs/iam-policy-contract.md).
 
 ## Testing
 
