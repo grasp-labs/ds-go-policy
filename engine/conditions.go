@@ -21,9 +21,10 @@ var ErrUnknownOperator = errors.New("unknown condition operator")
 // policy's acceptable values (OR-ed together).
 type condFunc func(actual string, present bool, wants []string) bool
 
-// conditionOps mirrors the common AWS IAM condition operators. Each "Not"
-// variant is the negation of its positive form, which also yields AWS's
-// missing-key behavior (a negated operator is true when the key is absent).
+// conditionOps mirrors the mainstream IAM condition operators. Each "Not"
+// variant is the negation of its positive form, which also yields the
+// conventional missing-key behavior (a negated operator is true when the key
+// is absent).
 // Every operator additionally supports the "...IfExists" suffix (handled in
 // evalConditions), which passes when the key is absent.
 var conditionOps = map[string]condFunc{
@@ -58,7 +59,7 @@ var conditionOps = map[string]condFunc{
 
 const ifExistsSuffix = "IfExists"
 
-// evalConditions applies AWS semantics: all operators must pass, all keys under
+// evalConditions applies conventional IAM semantics: all operators must pass, all keys under
 // an operator must pass, and a key's values OR together. Empty conditions match.
 func evalConditions(conds policy.Conditions, ctx map[string]string) bool {
 	for op, keyVals := range conds {
@@ -95,7 +96,7 @@ func evalConditions(conds policy.Conditions, ctx map[string]string) bool {
 // can consume it directly). Empty conditions resolve to (nil, true).
 func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred policy.Conditions, ok bool) {
 	for op, keyVals := range conds {
-		base, ifExists := strings.CutSuffix(op, ifExistsSuffix)
+		base, _ := strings.CutSuffix(op, ifExistsSuffix)
 		fn, known := conditionOps[base]
 		if !known {
 			return nil, false // defensive; Compile rejects unknown operators up front
@@ -103,6 +104,8 @@ func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred
 		for key, wants := range keyVals {
 			actual, present := ctx[key]
 			if !present {
+				// Deferred under the original operator, IfExists suffix and
+				// all: presence is decided against the store, not the context.
 				if deferred == nil {
 					deferred = policy.Conditions{}
 				}
@@ -112,7 +115,7 @@ func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred
 				deferred[op][key] = wants
 				continue
 			}
-			_ = ifExists // key is present, so IfExists is irrelevant here
+			// Present keys evaluate the base operator, same as evalConditions.
 			if !fn(actual, present, wants) {
 				return nil, false
 			}
@@ -248,7 +251,7 @@ func opIPAddress(actual string, present bool, wants []string) bool {
 	return false
 }
 
-// opNull implements the AWS Null operator: value "true" means the key must be
+// opNull implements the Null operator: value "true" means the key must be
 // absent, "false" means it must be present.
 func opNull(actual string, present bool, wants []string) bool {
 	_ = actual
@@ -264,7 +267,7 @@ func opNull(actual string, present bool, wants []string) bool {
 	return false
 }
 
-// wildcardMatch matches AWS StringLike wildcards: "*" (any sequence) and "?"
+// wildcardMatch matches StringLike wildcards: "*" (any sequence) and "?"
 // (single character). Linear time, rune-aware.
 func wildcardMatch(pattern, s string) bool {
 	p, t := []rune(pattern), []rune(s)

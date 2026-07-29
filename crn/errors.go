@@ -12,15 +12,16 @@ var (
 	ErrInvalidPartCount = errors.New("invalid part count")
 	ErrInvalidPrefix    = errors.New("invalid prefix")
 	ErrInvalidPattern   = errors.New("invalid CRN pattern")
-	ErrInvalidUUID      = errors.New("invalid UUID")
-	ErrLeadingSlash     = errors.New("leading slash in resource")
-	ErrTrailingSlash    = errors.New("trailing slash in resource")
-	ErrInvalidField     = errors.New("field contains delimiter")
+	// ErrInvalidTenant: the tenant field must be a UUID or PlatformTenant.
+	ErrInvalidTenant = errors.New("invalid tenant")
+	ErrLeadingSlash  = errors.New("leading slash in resource")
+	ErrTrailingSlash = errors.New("trailing slash in resource")
+	ErrInvalidField  = errors.New("field contains delimiter")
 )
 
 // ParseError describes why a CRN string, pattern, or field was rejected. It
 // wraps a sentinel kind (see the Err* vars) so callers can classify with
-// errors.Is, while the message adds AWS-style detail: the logical field, the
+// errors.Is, while the message adds structured detail: the logical field, the
 // offending value, an optional explanation, and the original input.
 type ParseError struct {
 	Kind   error  // sentinel kind (errors.Is target)
@@ -49,5 +50,5 @@ func (e *ParseError) Error() string {
 	return msg
 }
 
-// Unwrap exposes the sentinel kind so errors.Is(err, ErrInvalidUUID) etc. works.
+// Unwrap exposes the sentinel kind so errors.Is(err, ErrInvalidTenant) etc. works.
 func (e *ParseError) Unwrap() error { return e.Kind }

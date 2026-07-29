@@ -10,7 +10,8 @@ import (
 )
 
 func TestConditionsUnmarshal(t *testing.T) {
-	// Mirrors AWS: a value may be a single string or an array of strings.
+	// Mirrors the mainstream convention: a value may be a single string or an
+	// array of strings.
 	const doc = `{
 		"StringEquals": { "dept": "eng" },
 		"IpAddress":    { "ip": ["10.0.0.0/8", "192.168.0.0/16"] }

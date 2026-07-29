@@ -26,7 +26,6 @@ func pattern(t *testing.T, resource string) crn.Pattern {
 func TestPrefixes_FromConstrain(t *testing.T) {
 	// Drive the adapter from a real policy through engine.Constrain.
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "read", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources: []string{
@@ -37,7 +36,7 @@ func TestPrefixes_FromConstrain(t *testing.T) {
 				Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/secret/**", tenant)}},
 		},
 	}
-	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", nil)
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
 
 	allow, deny, err := pathfilter.Prefixes(c)
 	if err != nil {
@@ -55,14 +54,13 @@ func TestPrefixes_FromConstrain(t *testing.T) {
 // leaving a clean pattern the path filter can consume.
 func TestPrefixes_ContextOnlyConditionResolved(t *testing.T) {
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "team", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:datalake/**", tenant)},
 				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}}},
 		},
 	}
-	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles",
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant,
 		map[string]string{"department": "engineering"})
 
 	allow, _, err := pathfilter.Prefixes(c)
@@ -78,14 +76,13 @@ func TestPrefixes_ContextOnlyConditionResolved(t *testing.T) {
 // is deferred and the path adapter (which cannot express it) rejects it.
 func TestPrefixes_DeferredConditionRejected(t *testing.T) {
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "reports", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:reports/**", tenant)},
 				Conditions: policy.Conditions{"StringEquals": {"status": {"active"}}}},
 		},
 	}
-	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", nil)
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
 	if _, _, err := pathfilter.Prefixes(c); !errors.Is(err, pathfilter.ErrUnsupportedCondition) {
 		t.Errorf("err = %v, want ErrUnsupportedCondition", err)
 	}

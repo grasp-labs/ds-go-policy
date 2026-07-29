@@ -36,7 +36,7 @@ func TestExample_FileAccess(t *testing.T) {
 	pol := loadPolicy(t, "file-access.json")
 
 	file := func(path string) crn.CRN {
-		c, err := crn.Build(pol.TenantID, "owner-1", "file", "", "file", path)
+		c, err := crn.Build(tenant, "owner-1", "file", "", "file", path)
 		if err != nil {
 			t.Fatalf("Build file CRN %q: %v", path, err)
 		}
@@ -73,6 +73,47 @@ func TestExample_FileAccess(t *testing.T) {
 	}
 }
 
+// TestExample_PlatformGuardrail exercises docs/examples/platform-guardrail.json:
+// a platform-issued policy whose deny (patterns under the "aic" placeholder)
+// applies to every tenant's resources, layered on top of the tenant's own
+// file-access policy.
+func TestExample_PlatformGuardrail(t *testing.T) {
+	guardrail := loadPolicy(t, "platform-guardrail.json")
+	tenantPol := loadPolicy(t, "file-access.json")
+	policies := []policy.Policy{tenantPol, guardrail}
+
+	file := func(tenantID, path string) crn.CRN {
+		c, err := crn.Build(tenantID, "owner-1", "file", "", "file", path)
+		if err != nil {
+			t.Fatalf("Build file CRN %q: %v", path, err)
+		}
+		return c
+	}
+	activeCtx := map[string]string{"status": "active"}
+
+	// The tenant's own allow still works outside the guardrail.
+	got := engine.Decide(policies, engine.Request{
+		Action: "file:getFile", Resource: file(tenant, "team/config.json"), Context: activeCtx})
+	if !got.Allowed || got.Reason != "read-active-files" {
+		t.Errorf("outside guardrail = {Allowed:%v Reason:%q}, want allow via read-active-files", got.Allowed, got.Reason)
+	}
+
+	// The guardrail denies a path the tenant policy would otherwise allow.
+	got = engine.Decide(policies, engine.Request{
+		Action: "file:getFile", Resource: file(tenant, "team/secrets/token.txt"), Context: activeCtx})
+	if got.Allowed || got.Reason != "aic-protect-secrets" {
+		t.Errorf("under guardrail = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)
+	}
+
+	// The same document applies to any other tenant — no per-tenant rewrite.
+	other := "11111111-1111-1111-1111-111111111111"
+	got = engine.Decide([]policy.Policy{guardrail}, engine.Request{
+		Action: "file:getFile", Resource: file(other, "x/secrets/y")})
+	if got.Allowed || got.Reason != "aic-protect-secrets" {
+		t.Errorf("other tenant = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)
+	}
+}
+
 // TestExample_ConfigBilling exercises docs/examples/config-billing.json against
 // the Config API (service "config", type = resource kind, resource = id).
 func TestExample_ConfigBilling(t *testing.T) {
@@ -80,7 +121,7 @@ func TestExample_ConfigBilling(t *testing.T) {
 
 	const id = "11111111-1111-1111-1111-111111111111"
 	res := func(kind string) crn.CRN {
-		c, err := crn.Build(pol.TenantID, "owner-1", "config", "", kind, id)
+		c, err := crn.Build(tenant, "owner-1", "config", "", kind, id)
 		if err != nil {
 			t.Fatalf("Build config CRN %q: %v", kind, err)
 		}

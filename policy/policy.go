@@ -28,8 +28,8 @@ type Statement struct {
 }
 
 type Policy struct {
-	ID         string      `json:"id"`
-	TenantID   string      `json:"tenant_id"`
+	ID string `json:"id"`
+	// Version is the document's semantic version (e.g. "1.0.0").
 	Version    string      `json:"version"`
 	Statements []Statement `json:"statements"`
 }
@@ -42,19 +42,19 @@ func (p Policy) Validate() error {
 	for i, s := range p.Statements {
 		where := fmt.Sprintf("statement %d (%q)", i, s.Sid)
 		if !s.Effect.Valid() {
-			return &ParseError{Kind: ErrInvalidEffect, Field: "effect", Value: string(s.Effect), Input: where}
+			return &ParseError{Kind: ErrInvalidEffect, Field: "effect", Value: string(s.Effect), Statement: where}
 		}
 		if len(s.Actions) == 0 {
-			return &ParseError{Kind: ErrNoActions, Field: "actions", Input: where}
+			return &ParseError{Kind: ErrNoActions, Field: "actions", Statement: where}
 		}
 		if len(s.Resources) == 0 {
-			return &ParseError{Kind: ErrNoResources, Field: "resources", Input: where}
+			return &ParseError{Kind: ErrNoResources, Field: "resources", Statement: where}
 		}
 		if slices.Contains(s.Actions, "") {
-			return &ParseError{Kind: ErrEmptyAction, Field: "actions", Input: where}
+			return &ParseError{Kind: ErrEmptyAction, Field: "actions", Statement: where}
 		}
 		if slices.Contains(s.Resources, "") {
-			return &ParseError{Kind: ErrEmptyResource, Field: "resources", Input: where}
+			return &ParseError{Kind: ErrEmptyResource, Field: "resources", Statement: where}
 		}
 	}
 	return nil

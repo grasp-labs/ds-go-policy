@@ -1,6 +1,6 @@
 # IAM Policy Contract — `ds-go-policy`
 
-Shared policy engine consumed by the Echo authz middleware (request gating) and by services (data filtering). It maps 1:1 onto [`policies.md`](policies.md): CRN with region, statements, deny-wins.
+Shared policy engine consumed by the Echo authz middleware (request gating) and by services (data filtering): CRN with region, statements, deny-wins. Runnable policy documents live in [`examples/`](examples/).
 
 The security-critical logic (CRN matching, statement selection, effect resolution) has **exactly one** implementation here. It lives in its own module — **not** in `ds-go-echo-middleware`, since data filtering happens below the transport layer and must not import Echo.
 
@@ -8,8 +8,8 @@ The security-critical logic (CRN matching, statement selection, effect resolutio
 
 ```text
 ds-go-policy/
-  policy/          # data model: Policy, Statement, Effect (JSON = policies.md)
-  crn/             # CRN parse / build / match (the ARN analog)
+  policy/          # data model: Policy, Statement, Effect (JSON)
+  crn/             # CRN parse / build / match (the resource-name analog)
   engine/          # evaluator: Decide (full) + Constrain (partial)
   adapter/
     sqlfilter/     # Constraints -> GORM/SQL WHERE
@@ -26,7 +26,7 @@ services (repos) ──────┘        ▲
 services' data layer ─▶ ds-go-policy/adapter/* ─┘
 ```
 
-## `policy/` — the document (mirrors `policies.md`)
+## `policy/` — the document
 
 ```go
 package policy
@@ -46,7 +46,7 @@ type Statement struct {
     Conditions Conditions `json:"conditions,omitempty"`
 }
 
-// Conditions mirrors the AWS IAM condition block: operator -> key -> values.
+// Conditions mirrors the mainstream IAM condition block: operator -> key -> values.
 // Values unmarshal from a single string or an array of strings. Evaluation
 // (engine): operators AND, keys AND, a key's values OR. Supported operators
 // include String*, Numeric*, Date*, Bool, IpAddress/NotIpAddress, Null, and
@@ -56,7 +56,6 @@ type Values []string
 
 type Policy struct {
     ID         string      `json:"id"`
-    TenantID   string      `json:"tenant_id"`
     Version    string      `json:"version"`
     Statements []Statement `json:"statements"`
 }
@@ -87,6 +86,18 @@ func ParsePattern(s string) (Pattern, error)
 func (p Pattern) Matches(c CRN) bool
 ```
 
+### The platform tenant — `aic`
+
+`crn.PlatformTenant` (`"aic"`) is a reserved token in the tenant position,
+following the hyperscaler convention of a reserved pseudo-account. It marks
+**platform-issued policies usable by all tenants**: in a concrete CRN it names a platform-owned resource;
+in a pattern it is a placeholder for the requesting tenant and matches
+resources of any tenant. The engine evaluates whatever policy set the caller
+binds to a principal — restricting who may author `aic` patterns is the policy
+management plane's responsibility. For list/query paths `engine.Constrain`
+resolves the placeholder to the requesting tenant before emitting constraints,
+so adapters only ever see concrete tenants.
+
 ## `engine/` — the security-critical core (two modes)
 
 ```go
@@ -112,8 +123,9 @@ type Decision struct {
 func Decide(policies []policy.Policy, r Request) Decision
 
 // --- Mode 2: partial evaluation (emit a filter for list/query paths) ---
-// No concrete resource: given an action, reduce the policy set to the
-// allow/deny resource patterns (+ conditions) that survive for this principal.
+// No concrete resource: given an action and the requesting tenant, reduce the
+// policy set to the allow/deny resource patterns (+ conditions) that survive
+// for this principal.
 type ResourceMatch struct {
     Pattern    crn.Pattern
     Conditions policy.Conditions
@@ -124,9 +136,11 @@ type Constraints struct {
     Deny  []ResourceMatch // must be subtracted by the adapter (deny-wins)
 }
 
-// context resolves principal/request conditions up front; conditions on
-// resource attributes not present in context stay attached for the adapter.
-func Constrain(policies []policy.Policy, action string, context map[string]string) Constraints
+// tenant is the tenant the list/query runs in; patterns naming another tenant
+// are dropped and the platform placeholder resolves to it. context resolves
+// principal/request conditions up front; conditions on resource attributes not
+// present in context stay attached for the adapter.
+func Constrain(policies []policy.Policy, action, tenant string, context map[string]string) Constraints
 ```
 
 The caller resolves which policies apply to the principal (via the IAM binding / `map_group_policy`) and passes them in — the engine stays a pure function of `(policies, request)`, which makes it trivial to unit-test and impossible to couple to storage.

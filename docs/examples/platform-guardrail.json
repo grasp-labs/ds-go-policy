@@ -1,0 +1,16 @@
+{
+  "id": "aic-managed-guardrail",
+  "version": "1.0.0",
+  "statements": [
+    {
+      "sid": "aic-protect-secrets",
+      "effect": "deny",
+      "actions": [
+        "*"
+      ],
+      "resources": [
+        "crn:aic:*:file::file:**/secrets/**"
+      ]
+    }
+  ]
+}

@@ -87,14 +87,13 @@ func TestWhere_ExactIDResource(t *testing.T) {
 // End-to-end: Constrain resolves the context-only condition, so Where succeeds.
 func TestWhere_ContextOnlyConditionResolved(t *testing.T) {
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "team", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file:*:file:datalake/**", tenant)},
 				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}}},
 		},
 	}
-	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles",
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant,
 		map[string]string{"department": "engineering"})
 
 	sql, args, err := sqlfilter.Where(c, mapping())
@@ -116,14 +115,13 @@ func TestWhere_ContextOnlyConditionResolved(t *testing.T) {
 // predicate via Mapping.Conditions.
 func TestWhere_ResourceAttributeCondition(t *testing.T) {
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "eng-files", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:**", tenant)},
 				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}}},
 		},
 	}
-	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", nil)
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
 
 	m := mapping()
 	m.Region = "" // file is region-agnostic: no region column
@@ -147,7 +145,6 @@ func TestWhere_ResourceAttributeCondition(t *testing.T) {
 // the whole tree where status="active", minus the projectx/secrets subtree.
 func TestWhere_READMEFileAccessExample(t *testing.T) {
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "read-active-files", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:**", tenant)},
@@ -156,7 +153,7 @@ func TestWhere_READMEFileAccessExample(t *testing.T) {
 				Resources: []string{fmt.Sprintf("crn:%s:*:file::file:projectx/secrets/**", tenant)}},
 		},
 	}
-	cons := engine.Constrain([]policy.Policy{pol}, "file:listFiles", nil)
+	cons := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
 
 	sql, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
 		Tenant:     "tenant_id",
@@ -341,6 +338,32 @@ func TestWhere_Errors(t *testing.T) {
 	mid := engine.Constraints{Allow: []engine.ResourceMatch{{Pattern: pattern(t, "datalake/*/raw")}}}
 	if _, _, err := sqlfilter.Where(mid, mapping()); !errors.Is(err, sqlfilter.ErrUnsupportedPattern) {
 		t.Errorf("mid-path wildcard: err = %v", err)
+	}
+}
+
+// End-to-end with a platform-issued policy: engine.Constrain resolves the
+// tenant placeholder to the requesting tenant, so the adapter emits a plain
+// tenant predicate and never sees the placeholder.
+func TestWhere_PlatformPolicyResolvedByConstrain(t *testing.T) {
+	pol := policy.Policy{
+		ID: "aic-managed",
+		Statements: []policy.Statement{
+			{Sid: "aic-read", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:file:*:file:datalake/**", crn.PlatformTenant)}},
+		},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, mapping())
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	wantSQL := "tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if !reflect.DeepEqual(args, []any{tenant, "file", "datalake", "datalake/%"}) {
+		t.Errorf("args = %#v", args)
 	}
 }
 

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/grasp-labs/ds-go-policy/crn"
@@ -74,19 +73,6 @@ func Compile(policies []policy.Policy) (Compiled, error) {
 						Field: "resource",
 						Value: res,
 						Cause: err,
-						Input: res,
-					}
-				}
-				// A resource pattern must name the policy's own tenant; a
-				// mismatch is a dead statement (Matches requires exact tenant),
-				// so reject it at load time instead of silently never matching.
-				if pat.Tenant() != p.TenantID {
-					return Compiled{}, &ParseError{
-						Kind:   ErrTenantMismatch,
-						Field:  "tenant",
-						Value:  pat.Tenant(),
-						Detail: fmt.Sprintf("resource tenant does not match policy tenant %q", p.TenantID),
-						Input:  res,
 					}
 				}
 				cs.patterns = append(cs.patterns, pat)
@@ -172,8 +158,9 @@ func reason(sid, fallback string) string {
 }
 
 // --- Mode 2: partial evaluation (emit a filter for list/query paths) ---
-// No concrete resource: given an action, reduce the policy set to the
-// allow/deny resource patterns (+ conditions) that survive for this principal.
+// No concrete resource: given an action and the requesting tenant, reduce the
+// policy set to the allow/deny resource patterns (+ conditions) that survive
+// for this principal.
 type ResourceMatch struct {
 	Pattern    crn.Pattern
 	Conditions policy.Conditions
@@ -187,24 +174,30 @@ type Constraints struct {
 // Constrain is the pure-function entry point. On a compile error it fails closed
 // (returns empty constraints, i.e. no allow patterns → the adapter grants
 // nothing). Use Compile + Compiled.Constrain to surface errors explicitly.
-func Constrain(policies []policy.Policy, action string, context map[string]string) Constraints {
+func Constrain(policies []policy.Policy, action, tenant string, context map[string]string) Constraints {
 	c, err := Compile(policies)
 	if err != nil {
 		return Constraints{}
 	}
-	return c.Constrain(action, context)
+	return c.Constrain(action, tenant, context)
 }
 
 // Constrain collects the allow/deny resource patterns whose action matches, for
 // the adapter to turn into a storage filter. Only explicit allow/deny effects
 // contribute; any other effect is ignored (fail-closed).
 //
+// tenant is the tenant the list/query runs in — the same fact Decide reads from
+// Request.Resource. Patterns are matched against it exactly as Decide would:
+// a pattern naming another tenant is dropped, and the platform placeholder
+// (crn.PlatformTenant) is resolved to this tenant, so adapters only ever see
+// concrete tenants and never interpret policy.
+//
 // context supplies the principal/request attributes known at list time.
 // Conditions keyed on those attributes are resolved immediately: a statement
 // whose context-only condition fails is dropped (it does not apply to this
 // principal). Conditions keyed on attributes not in context are resource
 // attributes and stay attached to the pattern for the adapter to enforce.
-func (c Compiled) Constrain(action string, context map[string]string) Constraints {
+func (c Compiled) Constrain(action, tenant string, context map[string]string) Constraints {
 	var out Constraints
 	for _, s := range c.statements {
 		if !actionMatches(s.actions, action) {
@@ -215,6 +208,13 @@ func (c Compiled) Constrain(action string, context map[string]string) Constraint
 			continue // a context-only condition failed → statement doesn't apply
 		}
 		for _, pat := range s.patterns {
+			switch pat.Tenant() {
+			case tenant: // the pattern's own tenant
+			case crn.PlatformTenant: // placeholder → the requesting tenant
+				pat = pat.WithTenant(tenant)
+			default:
+				continue // another tenant: can never match this request
+			}
 			rm := ResourceMatch{Pattern: pat, Conditions: residual}
 			switch s.effect {
 			case policy.Deny:

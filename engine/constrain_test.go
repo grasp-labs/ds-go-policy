@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 	"github.com/grasp-labs/ds-go-policy/policy"
 )
@@ -21,8 +22,7 @@ func res(path string) string {
 //   - "protect": deny gated by a context-only condition (department)
 func constrainPolicy() policy.Policy {
 	return policy.Policy{
-		ID:       "p",
-		TenantID: constrainTenant,
+		ID: "p",
 		Statements: []policy.Statement{
 			{
 				Sid: "team", Effect: policy.Allow, Actions: []string{"file:listFiles"},
@@ -87,7 +87,7 @@ func findAllow(t *testing.T, c engine.Constraints, path string) engine.ResourceM
 // Happy path: department matches → context-only conditions resolved and stripped;
 // resource-attribute condition (status) is preserved for the adapter.
 func TestConstrain_ResolvesContextOnlyConditions(t *testing.T) {
-	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "file:listFiles",
+	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "file:listFiles", constrainTenant,
 		map[string]string{"department": "engineering"})
 
 	// team + public + reports all allowed.
@@ -120,7 +120,7 @@ func TestConstrain_ResolvesContextOnlyConditions(t *testing.T) {
 // Unhappy path: department mismatch → the context-only allow AND the context-only
 // deny are both dropped; unconditional/resource-attribute statements survive.
 func TestConstrain_DropsStatementsWhenContextFails(t *testing.T) {
-	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "file:listFiles",
+	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "file:listFiles", constrainTenant,
 		map[string]string{"department": "sales"})
 
 	if contains(allowPaths(c), "datalake/**") {
@@ -141,7 +141,7 @@ func TestConstrain_DropsStatementsWhenContextFails(t *testing.T) {
 // With no context supplied, every keyed condition is deferred (nothing resolved),
 // and context-gated statements survive with their conditions intact.
 func TestConstrain_NoContextDefersEverything(t *testing.T) {
-	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "file:listFiles", nil)
+	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "file:listFiles", constrainTenant, nil)
 
 	rm := findAllow(t, c, "datalake/**")
 	if got := rm.Conditions["StringEquals"]["department"]; len(got) != 1 || got[0] != "engineering" {
@@ -156,7 +156,7 @@ func TestConstrain_NoContextDefersEverything(t *testing.T) {
 // An action matched by no allow statement yields no allow patterns, so the
 // adapter grants nothing. (The wildcard "*" deny still applies to every action.)
 func TestConstrain_NoMatchingAction(t *testing.T) {
-	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "config:listConfigs", nil)
+	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "config:listConfigs", constrainTenant, nil)
 	if len(c.Allow) != 0 {
 		t.Errorf("expected no allow patterns, got %v", allowPaths(c))
 	}
@@ -165,16 +165,55 @@ func TestConstrain_NoMatchingAction(t *testing.T) {
 	}
 }
 
+// Constrain applies the same tenant matching as Decide: a platform-issued
+// pattern (placeholder tenant) is resolved to the requesting tenant, and a
+// pattern naming another tenant is dropped.
+func TestConstrain_TenantMatching(t *testing.T) {
+	otherTenant := "11111111-1111-1111-1111-111111111111"
+	platform := policy.Policy{
+		ID: "aic-managed",
+		Statements: []policy.Statement{{
+			Sid: "aic-deny-secrets", Effect: policy.Deny, Actions: []string{"*"},
+			Resources: []string{fmt.Sprintf("crn:%s:*:file::file:**/secrets/**", crn.PlatformTenant)},
+		}},
+	}
+	otherPol := policy.Policy{
+		ID: "other",
+		Statements: []policy.Statement{{
+			Sid: "other-allow", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+			Resources: []string{fmt.Sprintf("crn:%s:*:file::file:**", otherTenant)},
+		}},
+	}
+
+	c := engine.Constrain([]policy.Policy{constrainPolicy(), platform, otherPol},
+		"file:listFiles", constrainTenant, nil)
+
+	// The placeholder is resolved: the emitted deny names the requesting tenant.
+	if !contains(denyPaths(c), "**/secrets/**") {
+		t.Fatalf("platform deny missing; got %v", denyPaths(c))
+	}
+	for _, rm := range c.Deny {
+		if rm.Pattern.Tenant() == crn.PlatformTenant {
+			t.Errorf("placeholder leaked to constraints: %v", rm.Pattern)
+		}
+	}
+
+	// The other tenant's allow cannot match this request and is dropped.
+	if contains(allowPaths(c), "**") {
+		t.Errorf("other tenant's pattern must be dropped; got %v", allowPaths(c))
+	}
+}
+
 // A malformed policy makes Constrain fail closed: no allow patterns.
 func TestConstrain_FailsClosedOnBadPolicy(t *testing.T) {
 	bad := policy.Policy{
-		ID: "bad", TenantID: constrainTenant,
+		ID: "bad",
 		Statements: []policy.Statement{{
 			Sid: "x", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 			Resources: []string{"not-a-crn"},
 		}},
 	}
-	c := engine.Constrain([]policy.Policy{bad}, "file:listFiles", nil)
+	c := engine.Constrain([]policy.Policy{bad}, "file:listFiles", constrainTenant, nil)
 	if len(c.Allow) != 0 {
 		t.Errorf("bad policy must yield no allow patterns, got %v", allowPaths(c))
 	}

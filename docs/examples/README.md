@@ -34,6 +34,15 @@ currently empty.
 3. **`protect-projectx-secrets`** — deny every action on `projectx/secrets/**`
    (deny-wins).
 
+## `platform-guardrail.json`
+
+A **platform-issued** policy: its patterns use the reserved platform token
+`aic` (`crn.PlatformTenant`) as a placeholder for the requesting tenant, so the
+one document applies to every tenant it is bound to.
+
+1. **`aic-protect-secrets`** — deny every action on any `**/secrets/**` path,
+   in any tenant (a guardrail that overrides tenant allows, deny-wins).
+
 ## `config-billing.json`
 
 1. **`billing-read`** — billing list/get across all Config resources.

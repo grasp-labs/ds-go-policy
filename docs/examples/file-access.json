@@ -1,7 +1,6 @@
 {
   "id": "pol-file-access",
-  "tenant_id": "ba62a53f-afa9-427d-9d91-c7987bc5662e",
-  "version": "2026-07-01",
+  "version": "1.0.0",
   "statements": [
     {
       "sid": "read-active-files",

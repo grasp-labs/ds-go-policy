@@ -1,10 +1,10 @@
 # ds-go-policy
 
-![Build](https://github.com/grasp-labs/ds-go-policy/actions/workflows/ci.yml/badge.svg)
-[![Go Report Card](https://goreportcard.com/badge/github.com/grasp-labs/ds-go-policy)](https://goreportcard.com/report/github.com/grasp-labs/ds-go-policy)
-[![codecov](https://codecov.io/gh/grasp-labs/ds-go-policy/branch/main/graph/badge.svg)](https://codecov.io/gh/grasp-labs/ds-go-policy)
-[![GitHub release](https://img.shields.io/github/v/release/grasp-labs/ds-go-policy)](https://github.com/grasp-labs/ds-go-policy/releases)
-![License](https://img.shields.io/github/license/grasp-labs/ds-go-policy?cacheSeconds=60)
+Build
+[Go Report Card](https://goreportcard.com/report/github.com/grasp-labs/ds-go-policy)
+[codecov](https://codecov.io/gh/grasp-labs/ds-go-policy)
+[GitHub release](https://github.com/grasp-labs/ds-go-policy/releases)
+License
 
 A small, dependency-light IAM policy engine for Go. It answers two questions from
 the same policy documents:
@@ -19,25 +19,29 @@ decision and a list filter can never disagree.
 ## Design principles
 
 - **Pure functions.** The engine is a function of `(policies, request)`. The
-  caller resolves which policies apply to a principal and passes them in; the
-  engine has no storage, HTTP, or transport dependencies.
+caller resolves which policies apply to a principal and passes them in; the
+engine has no storage, HTTP, or transport dependencies.
 - **Deny-wins, default-deny.** Any matching `deny` overrides every `allow`, and
-  nothing is permitted unless explicitly allowed.
+nothing is permitted unless explicitly allowed.
 - **Fail closed.** Policies are validated and compiled up front; malformed
-  effects, unparseable resource patterns, and unknown condition operators are
-  rejected rather than silently skipped.
+effects, unparseable resource patterns, and unknown condition operators are
+rejected rather than silently skipped.
 - **Familiar semantics** for actions, resource wildcards, and condition
-  operators, adapted to Commons's CRN resource identity.
+operators, adapted to Commons's CRN resource identity.
+
+
 
 ## Packages
 
-| Package                  | Responsibility                                                        |
-| ------------------------ | -------------------------------------------------------------------- |
-| `policy`                 | Data model: `Policy`, `Statement`, `Effect`, `Conditions` (JSON).    |
-| `crn`                    | Resource identity: parse / build / match CRNs and CRN patterns.      |
-| `engine`                 | Evaluator: `Decide` (full) and `Constrain` (partial).               |
-| `adapter/sqlfilter`      | `Constraints` → SQL `WHERE` clause.                                  |
-| `adapter/pathfilter`     | `Constraints` → filesystem / object-store path globs.               |
+
+| Package              | Responsibility                                                    |
+| -------------------- | ----------------------------------------------------------------- |
+| `policy`             | Data model: `Policy`, `Statement`, `Effect`, `Conditions` (JSON). |
+| `crn`                | Resource identity: parse / build / match CRNs and CRN patterns.   |
+| `engine`             | Evaluator: `Decide` (full) and `Constrain` (partial).             |
+| `adapter/sqlfilter`  | `Constraints` → SQL `WHERE` clause.                               |
+| `adapter/pathfilter` | `Constraints` → filesystem / object-store path globs.             |
+
 
 Dependency direction is acyclic: `adapter/* → engine → {policy, crn}`. Nothing
 imports transport or storage.
@@ -45,20 +49,22 @@ imports transport or storage.
 ## Installation
 
 ```bash
-go get github.com/grasp-labs/ds-go/policy
+go get github.com/grasp-labs/ds-go-policy
 ```
 
 Requires Go 1.26+.
 
 ## Quick start
 
+
+
 ### Gate a request (`Decide`)
 
 ```go
 import (
-	"github.com/grasp-labs/ds-go/policy/crn"
-	"github.com/grasp-labs/ds-go/policy/engine"
-	"github.com/grasp-labs/ds-go/policy/policy"
+	"github.com/grasp-labs/ds-go-policy/crn"
+	"github.com/grasp-labs/ds-go-policy/engine"
+	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
 // The concrete resource being acted on.
@@ -88,6 +94,8 @@ if err != nil {
 decision := compiled.Decide(req)
 ```
 
+
+
 ### Filter a list/query (`Constrain`)
 
 For a list or search there is no concrete resource, so instead of a yes/no the
@@ -96,25 +104,25 @@ principal, and an adapter turns them into a storage filter. Conditions are split
 by where their data lives:
 
 - **Attributes already known for the request** (e.g. the target `environment`
-  in the config policy) are passed in the `context` and resolved up front — a
-  statement whose context condition fails is dropped.
+in the config policy) are passed in the `context` and resolved up front — a
+statement whose context condition fails is dropped.
 - **Resource attributes** (e.g. the file's `status`, stored on each row) are
-  *not* in the context, so they stay attached to the pattern and the adapter
-  turns them into predicates via `Mapping.Conditions`.
+*not* in the context, so they stay attached to the pattern and the adapter
+turns them into predicates via `Mapping.Conditions`.
 
-Take the file-access policy from [`docs/examples/`](./docs/examples/file-access.json):
+Take the file-access policy from `[docs/examples/](./docs/examples/file-access.json)`:
 it allows `file:listFiles` over the whole tree where `status = "active"`, and
 denies everything under `projectx/secrets/`. Constraining it for a `listFiles`
 request yields a `WHERE` clause that narrows the query to exactly what the
 principal may see:
 
 ```go
-import "github.com/grasp-labs/ds-go/policy/adapter/sqlfilter"
+import "github.com/grasp-labs/ds-go-policy/adapter/sqlfilter"
 
 // policies for the principal (see docs/examples/file-access.json):
 //   allow file:listFiles on **                 where status = "active"
 //   deny  *              on projectx/secrets/**
-cons := engine.Constrain(policies, "file:listFiles", nil)
+cons := engine.Constrain(policies, "file:listFiles", tenantID, nil)
 
 where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
 	Tenant:     "tenant_id",
@@ -142,6 +150,8 @@ dropped before any SQL is generated.
 
 ## Concepts
 
+
+
 ### CRN — resource identity
 
 A CRN names a resource:
@@ -150,9 +160,41 @@ A CRN names a resource:
 crn:{tenant}:{scope}:{service}:{region}:{type}:{resource}
 ```
 
-- `tenant` is always a UUID (tenant isolation — never a wildcard).
+- `tenant` is a UUID (tenant isolation — never a wildcard), or the reserved
+platform token `aic` (see below).
 - `resource` is an S3-style relative path (no leading/trailing `/`); it may
-  contain `:` since it is the final field.
+contain `:` since it is the final field.
+
+### The platform tenant — `aic`
+
+Following the hyperscaler convention of a reserved pseudo-account, `aic` is a
+reserved token in the tenant position for **platform-issued policies usable by
+all tenants** (`crn.PlatformTenant`):
+
+- In a **concrete CRN**, `aic` names a platform-owned resource.
+- In a **resource pattern**, `aic` is a placeholder for the requesting tenant:
+the pattern matches resources of *any* tenant, so one platform-issued document
+(a managed allow, or a guardrail deny) applies to every tenant it is bound to.
+- The engine evaluates whatever policy set the caller binds to a principal;
+restricting who may *author* `crn:aic:...` patterns is the responsibility of
+the policy management plane that issues and stores policies.
+
+```json
+{
+  "id": "aic-managed-guardrail",
+  "statements": [{
+    "sid": "aic-protect-secrets",
+    "effect": "deny",
+    "actions": ["*"],
+    "resources": ["crn:aic:*:file::file:**/secrets/**"]
+  }]
+}
+```
+
+For list/query paths, `engine.Constrain` takes the requesting tenant (the same
+fact `Decide` reads from `Request.Resource`) and resolves the placeholder to it
+before emitting constraints — adapters only ever see concrete tenants and never
+interpret policy.
 
 `crn.Parse` validates a serialized CRN; `crn.Build` constructs a canonical one
 (stripping leading/trailing slashes from the resource).
@@ -164,10 +206,12 @@ A `Pattern` is a CRN whose fields may be wildcards:
 - `*` — matches exactly **one** segment (one flat field, or one path element).
 - `**` — matches **zero or more** path segments (resource path only).
 
-| Pattern            | Matches                                  | Does not match          |
-| ------------------ | ---------------------------------------- | ----------------------- |
-| `projectx/*`       | `projectx/app.json`                      | `projectx/sub/app.json` |
-| `projectx/**`      | `projectx`, `projectx/sub/app.json`      | `other/app.json`        |
+
+| Pattern       | Matches                             | Does not match          |
+| ------------- | ----------------------------------- | ----------------------- |
+| `projectx/*`  | `projectx/app.json`                 | `projectx/sub/app.json` |
+| `projectx/**` | `projectx`, `projectx/sub/app.json` | `other/app.json`        |
+
 
 Matching is whole-segment and linear-time (no backtracking).
 
@@ -197,16 +241,18 @@ service supplies in `Request.Context`.
 
 ## Examples
 
-Runnable policy documents live in [`docs/examples/`](./docs/examples), modeled on
+Runnable policy documents live in `[docs/examples/](./docs/examples)`, modeled on
 the DS-file and Config APIs. They are loaded and evaluated by the test suite, so
 they stay in sync with the implementation. See the full design contract in
-[`docs/iam-policy-contract.md`](./docs/iam-policy-contract.md).
+`[docs/iam-policy-contract.md](./docs/iam-policy-contract.md)`.
 
 ## Testing
 
 ```bash
 go test ./...
 ```
+
+
 
 ## License
 

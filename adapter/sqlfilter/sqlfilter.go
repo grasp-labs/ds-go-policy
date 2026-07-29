@@ -105,7 +105,8 @@ func orGroups(matches []engine.ResourceMatch, m Mapping) (string, []any, error) 
 
 func group(rm engine.ResourceMatch, m Mapping) (string, []any, error) {
 	p := rm.Pattern
-	// Tenant is always constrained (never a wildcard).
+	// Tenant is always constrained (never a wildcard); engine.Constrain has
+	// already resolved the platform placeholder to a concrete tenant.
 	preds := []string{m.Tenant + " = ?"}
 	args := []any{p.Tenant()}
 
@@ -304,8 +305,8 @@ func inPred(col string, args []any) (string, []any) {
 	return fmt.Sprintf("%s IN (%s)", col, placeholders(len(args))), args
 }
 
-// notInPred is the negation of inPred. A NULL column passes, mirroring AWS's
-// "key absent ⇒ NotEquals is true" semantics.
+// notInPred is the negation of inPred. A NULL column passes, mirroring the
+// conventional "key absent ⇒ NotEquals is true" semantics.
 func notInPred(col string, args []any) (string, []any) {
 	if len(args) == 1 {
 		return fmt.Sprintf("(%s IS NULL OR %s <> ?)", col, col), args
@@ -369,7 +370,7 @@ func boolPred(col string, vals policy.Values) (string, []any, error) {
 	return s, a, nil
 }
 
-// nullPred implements the AWS Null operator: "true" ⇒ column IS NULL,
+// nullPred implements the Null operator: "true" ⇒ column IS NULL,
 // "false" ⇒ column IS NOT NULL.
 func nullPred(col string, vals policy.Values) (string, []any, error) {
 	if len(vals) != 1 {
@@ -412,7 +413,7 @@ func placeholders(n int) string {
 	return strings.Repeat("?, ", n-1) + "?"
 }
 
-// likePattern converts an AWS StringLike value into a SQL LIKE pattern: literal
+// likePattern converts a StringLike value into a SQL LIKE pattern: literal
 // LIKE metacharacters are escaped, then "*"→"%" and "?"→"_".
 func likePattern(s string) string {
 	esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)

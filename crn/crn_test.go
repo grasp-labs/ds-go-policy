@@ -48,7 +48,7 @@ func TestParseErrors(t *testing.T) {
 	}{
 		{"too few parts", "crn:" + tenant + ":file", ErrInvalidPartCount},
 		{"bad prefix", fmt.Sprintf("arn:%s:%s:file::file:x", tenant, scope), ErrInvalidPrefix},
-		{"bad uuid", fmt.Sprintf("crn:%s:%s:file::file:x", "not-a-uuid", scope), ErrInvalidUUID},
+		{"bad tenant", fmt.Sprintf("crn:%s:%s:file::file:x", "not-a-uuid", scope), ErrInvalidTenant},
 		{"leading slash", fmt.Sprintf("crn:%s:%s:file::file:%s", tenant, scope, "/datalake"), ErrLeadingSlash},
 		{"trailing slash", fmt.Sprintf("crn:%s:%s:file::file:%s", tenant, scope, "datalake/"), ErrTrailingSlash},
 	}
@@ -75,8 +75,14 @@ func TestBuild(t *testing.T) {
 	if _, err := Build(tenant, "a:b", "file", "", "file", "x"); !errors.Is(err, ErrInvalidField) {
 		t.Errorf("Build with colon in scope err = %v, want %v", err, ErrInvalidField)
 	}
-	if _, err := Build("not-a-uuid", scope, "file", "", "file", "x"); !errors.Is(err, ErrInvalidUUID) {
-		t.Errorf("Build with bad uuid err = %v, want %v", err, ErrInvalidUUID)
+	_, err = Build("not-a-uuid", scope, "file", "", "file", "x")
+	if !errors.Is(err, ErrInvalidTenant) {
+		t.Errorf("Build with bad tenant err = %v, want %v", err, ErrInvalidTenant)
+	}
+	// The error must carry the offending tenant value, not an empty string.
+	var pe *ParseError
+	if !errors.As(err, &pe) || pe.Value != "not-a-uuid" {
+		t.Errorf("Build error detail = %+v, want Value=%q", pe, "not-a-uuid")
 	}
 }
 
@@ -137,17 +143,65 @@ func TestParseErrorDetail(t *testing.T) {
 	_, err := Parse(input)
 
 	// Classifiable via the sentinel kind.
-	if !errors.Is(err, ErrInvalidUUID) {
-		t.Fatalf("errors.Is(ErrInvalidUUID) = false; err = %v", err)
+	if !errors.Is(err, ErrInvalidTenant) {
+		t.Fatalf("errors.Is(ErrInvalidTenant) = false; err = %v", err)
 	}
 
-	// Carries structured, AWS-style detail.
+	// Carries structured detail.
 	var pe *ParseError
 	if !errors.As(err, &pe) {
 		t.Fatalf("errors.As(*ParseError) = false; err = %v", err)
 	}
 	if pe.Field != "tenant" || pe.Value != "not-a-uuid" || pe.Input != input {
 		t.Errorf("ParseError detail = %+v, want field=tenant value=not-a-uuid input=%q", pe, input)
+	}
+}
+
+func TestPlatformTenant(t *testing.T) {
+	// Parse and Build accept the reserved platform token, and it round-trips.
+	in := fmt.Sprintf("crn:%s:%s:file::file:shared/datasets", PlatformTenant, scope)
+	c, err := Parse(in)
+	if err != nil {
+		t.Fatalf("Parse(%q) error: %v", in, err)
+	}
+	if c.Tenant != PlatformTenant {
+		t.Errorf("Parse tenant = %q, want %q", c.Tenant, PlatformTenant)
+	}
+	if got := c.String(); got != in {
+		t.Errorf("round-trip = %q, want %q", got, in)
+	}
+	if b, err := Build(PlatformTenant, scope, "file", "", "file", "x"); err != nil || b.Tenant != PlatformTenant {
+		t.Errorf("Build(platform tenant) = (%v, %v), want tenant %q", b, err, PlatformTenant)
+	}
+	// Only the exact reserved token is accepted — no other non-UUID string.
+	if _, err := Parse(fmt.Sprintf("crn:%s:%s:file::file:x", "platform", scope)); !errors.Is(err, ErrInvalidTenant) {
+		t.Errorf("Parse with unreserved token err = %v, want %v", err, ErrInvalidTenant)
+	}
+}
+
+func TestMatchesPlatformTenant(t *testing.T) {
+	// A platform-issued pattern (tenant "aic") applies to every tenant's
+	// resources — that is what makes platform policies usable by all.
+	p, err := ParsePattern(fmt.Sprintf("crn:%s:*:file::file:datalake/**", PlatformTenant))
+	if err != nil {
+		t.Fatalf("ParsePattern error: %v", err)
+	}
+	for _, tn := range []string{tenant, scope, PlatformTenant} {
+		c := CRN{Tenant: tn, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"}
+		if !p.Matches(c) {
+			t.Errorf("platform pattern did not match tenant %q", tn)
+		}
+	}
+
+	// The reverse does not hold: a concrete-tenant pattern never matches a
+	// platform-owned resource.
+	tp, err := ParsePattern(fmt.Sprintf("crn:%s:*:file::file:**", tenant))
+	if err != nil {
+		t.Fatalf("ParsePattern error: %v", err)
+	}
+	platformRes := CRN{Tenant: PlatformTenant, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"}
+	if tp.Matches(platformRes) {
+		t.Errorf("tenant pattern matched a platform resource; want deny")
 	}
 }
 

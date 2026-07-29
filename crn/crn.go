@@ -7,6 +7,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// PlatformTenant is the reserved token accepted in the tenant field, following
+// the hyperscaler convention of a reserved pseudo-account. In a concrete CRN it
+// names a platform-owned resource; in a Pattern it stands for the requesting
+// tenant and matches
+// resources of any tenant, which is what lets a single platform-issued policy
+// apply to every tenant. The engine evaluates whatever documents it is given —
+// restricting who may author patterns under this token is the responsibility
+// of the policy management plane that issues and binds policies.
+const PlatformTenant = "aic"
+
 // CRN is a resource identity
 type CRN struct {
 	Tenant  string
@@ -39,9 +49,9 @@ func Parse(s string) (CRN, error) {
 			Input:  s,
 		}
 	}
-	tenantID, err := uuid.Parse(parts[1])
+	tenant, err := normalizeTenant(parts[1])
 	if err != nil {
-		return CRN{}, &ParseError{Kind: ErrInvalidUUID, Field: "tenant", Value: parts[1], Input: s}
+		return CRN{}, &ParseError{Kind: ErrInvalidTenant, Field: "tenant", Value: parts[1], Input: s}
 	}
 
 	res := parts[6]
@@ -53,13 +63,27 @@ func Parse(s string) (CRN, error) {
 		return CRN{}, &ParseError{Kind: ErrTrailingSlash, Field: "resource", Value: res, Input: s}
 	}
 	return CRN{
-		Tenant:   tenantID.String(),
+		Tenant:   tenant,
 		Scope:    parts[2],
 		Service:  parts[3],
 		Region:   parts[4],
 		Type:     parts[5],
-		Resource: parts[6],
+		Resource: res,
 	}, nil
+}
+
+// normalizeTenant validates the tenant field: a UUID (canonicalized) or the
+// reserved PlatformTenant token. Anything else is rejected — the tenant is the
+// isolation boundary and must never be a free-form string or a wildcard.
+func normalizeTenant(tenant string) (string, error) {
+	if tenant == PlatformTenant {
+		return tenant, nil
+	}
+	id, err := uuid.Parse(tenant)
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
 }
 
 func (c CRN) String() string {
@@ -70,9 +94,9 @@ func (c CRN) String() string {
 // (leading and trailing "/" stripped). Because ":" is the CRN delimiter, the
 // flat fields must not contain it; the resource may (it is the final field).
 func Build(tenant, scope, service, region, typ, resource string) (CRN, error) {
-	id, err := uuid.Parse(tenant)
+	normalized, err := normalizeTenant(tenant)
 	if err != nil {
-		return CRN{}, &ParseError{Kind: ErrInvalidUUID, Field: "tenant", Value: tenant}
+		return CRN{}, &ParseError{Kind: ErrInvalidTenant, Field: "tenant", Value: tenant}
 	}
 	for _, f := range []struct{ name, val string }{
 		{"scope", scope}, {"service", service}, {"region", region}, {"type", typ},
@@ -88,7 +112,7 @@ func Build(tenant, scope, service, region, typ, resource string) (CRN, error) {
 	}
 	resource = strings.Trim(resource, "/")
 	return CRN{
-		Tenant:   id.String(),
+		Tenant:   normalized,
 		Scope:    scope,
 		Service:  service,
 		Region:   region,
@@ -104,13 +128,16 @@ const (
 )
 
 // Pattern is a CRN that may contain * (single segment) and ** (recursive, path-addressed).
-// Tenant is never a wildcard — it is always a concrete UUID (tenant isolation).
+// Tenant is never a wildcard — it is a concrete UUID (tenant isolation) or the
+// reserved PlatformTenant token, which stands for the requesting tenant in
+// platform-issued policies.
 type Pattern struct {
 	crn CRN // Scope/Service/Region/Type may be "*"; Resource may contain "*" and "**"
 }
 
 // Field accessors expose the (possibly wildcarded) pattern segments so adapters
-// can translate a Pattern into a storage filter. Tenant is always a concrete UUID.
+// can translate a Pattern into a storage filter. Tenant is a concrete UUID or
+// the reserved PlatformTenant token.
 func (p Pattern) Tenant() string   { return p.crn.Tenant }
 func (p Pattern) Scope() string    { return p.crn.Scope }
 func (p Pattern) Service() string  { return p.crn.Service }
@@ -121,8 +148,16 @@ func (p Pattern) Resource() string { return p.crn.Resource }
 // String renders the pattern in canonical CRN form.
 func (p Pattern) String() string { return p.crn.String() }
 
+// WithTenant returns a copy of the pattern with its tenant replaced. The engine
+// uses it to resolve the PlatformTenant placeholder to the requesting tenant
+// when emitting constraints, so adapters only ever see concrete tenants.
+func (p Pattern) WithTenant(tenant string) Pattern {
+	p.crn.Tenant = tenant
+	return p
+}
+
 func ParsePattern(s string) (Pattern, error) {
-	c, err := Parse(s) // structural + "crn" prefix + tenant-UUID validation, reused
+	c, err := Parse(s) // structural + "crn" prefix + tenant validation, reused
 	if err != nil {
 		return Pattern{}, err
 	}
@@ -144,12 +179,19 @@ func ParsePattern(s string) (Pattern, error) {
 }
 
 func (p Pattern) Matches(c CRN) bool {
-	return p.crn.Tenant == c.Tenant && // exact: tenant is never a wildcard
+	return matchTenant(p.crn.Tenant, c.Tenant) &&
 		matchField(p.crn.Scope, c.Scope) &&
 		matchField(p.crn.Service, c.Service) &&
 		matchField(p.crn.Region, c.Region) &&
 		matchField(p.crn.Type, c.Type) &&
 		matchPath(strings.Split(p.crn.Resource, "/"), strings.Split(c.Resource, "/"))
+}
+
+// matchTenant: exact match, except the reserved platform tenant in a pattern,
+// which applies to resources of every tenant (platform-issued policies). "*"
+// is never valid here — a concrete tenant pattern only matches its own tenant.
+func matchTenant(pat, val string) bool {
+	return pat == val || pat == PlatformTenant
 }
 
 // matchField: "*" matches any single field value (including ""), else exact.

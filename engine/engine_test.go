@@ -36,9 +36,8 @@ func mustResource(t *testing.T, resource string) crn.CRN {
 // datalake/raw, and explicitly denies anything under datalake/secret.
 func samplePolicy() policy.Policy {
 	return policy.Policy{
-		ID:       "pol-1",
-		TenantID: tenant,
-		Version:  "2026-07-01",
+		ID:      "pol-1",
+		Version: "1.0.0",
 		Statements: []policy.Statement{
 			{
 				Sid:       "read-datalake",
@@ -152,7 +151,6 @@ func TestDecide_APIRequestSimulation(t *testing.T) {
 func TestDecide_DenyWinsRegardlessOfOrder(t *testing.T) {
 	// Deny appears BEFORE the allow; deny must still win.
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "deny-first", Effect: policy.Deny, Actions: []string{"*"}, Resources: []string{crnPattern("datalake/**")}},
 			{Sid: "allow-second", Effect: policy.Allow, Actions: []string{"*"}, Resources: []string{crnPattern("datalake/**")}},
@@ -167,7 +165,6 @@ func TestDecide_DenyWinsRegardlessOfOrder(t *testing.T) {
 func TestDecide_FailsClosedOnBadEffect(t *testing.T) {
 	// A statement with an unrecognized effect must NOT be treated as allow.
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{{
 			Sid:       "typo-effect",
 			Effect:    "Allow", // wrong case: not policy.Allow
@@ -185,7 +182,6 @@ func TestDecide_FailsClosedOnBadDenyPattern(t *testing.T) {
 	// A malformed DENY pattern must not be silently skipped (that would be
 	// fail-open); the whole policy set is rejected and the request denied.
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{
 			{Sid: "allow-all", Effect: policy.Allow, Actions: []string{"*"}, Resources: []string{crnPattern("datalake/**")}},
 			{Sid: "broken-deny", Effect: policy.Deny, Actions: []string{"*"}, Resources: []string{"not-a-valid-crn"}},
@@ -199,8 +195,7 @@ func TestDecide_FailsClosedOnBadDenyPattern(t *testing.T) {
 
 func TestCompile_ReportsError(t *testing.T) {
 	pol := policy.Policy{
-		ID:       "pol-bad",
-		TenantID: tenant,
+		ID: "pol-bad",
 		Statements: []policy.Statement{
 			{Sid: "s", Effect: policy.Allow, Actions: []string{"*"}, Resources: []string{"not-a-valid-crn"}},
 		},
@@ -210,25 +205,73 @@ func TestCompile_ReportsError(t *testing.T) {
 	}
 }
 
-func TestCompile_RejectsCrossTenantResource(t *testing.T) {
-	// A resource pattern naming a different tenant is a dead statement (Matches
-	// requires exact tenant); Compile must reject it at load time.
+func TestDecide_CrossTenantResourceNeverMatches(t *testing.T) {
+	// A pattern naming another tenant compiles, but tenant isolation holds at
+	// evaluation: it can never match this tenant's resources.
 	otherTenant := "11111111-1111-1111-1111-111111111111"
 	pol := policy.Policy{
-		ID:       "pol-x",
-		TenantID: tenant,
+		ID: "pol-x",
 		Statements: []policy.Statement{
 			{Sid: "s", Effect: policy.Allow, Actions: []string{"*"},
 				Resources: []string{fmt.Sprintf("crn:%s:*:file::file:**", otherTenant)}},
 		},
 	}
-	if _, err := engine.Compile([]policy.Policy{pol}); !errors.Is(err, engine.ErrTenantMismatch) {
-		t.Errorf("Compile err = %v, want ErrTenantMismatch", err)
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x")}
+	if got := engine.Decide([]policy.Policy{pol}, req); got.Allowed {
+		t.Errorf("cross-tenant allow matched; want implicit deny, got %q", got.Reason)
 	}
 }
 
-func TestCompile_AcceptsMatchingTenantResource(t *testing.T) {
-	// The same tenant on policy and resource compiles cleanly.
+// platformPolicy is a platform-issued policy: its patterns use the reserved
+// platform token as the tenant placeholder, so one document applies to every
+// tenant.
+func platformPolicy(statements ...policy.Statement) policy.Policy {
+	return policy.Policy{
+		ID:         "aic-managed",
+		Version:    "1.0.0",
+		Statements: statements,
+	}
+}
+
+func TestDecide_PlatformPolicyAppliesToAnyTenant(t *testing.T) {
+	// A platform-issued allow grants the action on the requesting tenant's own
+	// resources without naming that tenant anywhere in the document.
+	pol := platformPolicy(policy.Statement{
+		Sid:       "aic-read-datalake",
+		Effect:    policy.Allow,
+		Actions:   []string{"file:getFile"},
+		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/**", crn.PlatformTenant)},
+	})
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/reports/q1.csv")}
+	got := engine.Decide([]policy.Policy{pol}, req)
+	if !got.Allowed || got.Reason != "aic-read-datalake" {
+		t.Errorf("Decide = {Allowed:%v Reason:%q}, want allow via aic-read-datalake", got.Allowed, got.Reason)
+	}
+}
+
+func TestDecide_PlatformGuardrailDenyWins(t *testing.T) {
+	// A platform-issued deny is a guardrail: it overrides a tenant's own allow.
+	guardrail := platformPolicy(policy.Statement{
+		Sid:       "aic-protect-secrets",
+		Effect:    policy.Deny,
+		Actions:   []string{"*"},
+		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/secret/**", crn.PlatformTenant)},
+	})
+	// The tenant policy allows the whole datalake and has no deny of its own.
+	tenantAllow := policy.Policy{
+		Statements: []policy.Statement{
+			{Sid: "read-datalake", Effect: policy.Allow, Actions: []string{"*"},
+				Resources: []string{crnPattern("datalake/**")}},
+		},
+	}
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/secret/keys.txt")}
+	got := engine.Decide([]policy.Policy{tenantAllow, guardrail}, req)
+	if got.Allowed || got.Reason != "aic-protect-secrets" {
+		t.Errorf("Decide = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)
+	}
+}
+
+func TestCompile_AcceptsValidPolicy(t *testing.T) {
 	if _, err := engine.Compile([]policy.Policy{samplePolicy()}); err != nil {
 		t.Errorf("Compile err = %v, want nil", err)
 	}
@@ -236,7 +279,6 @@ func TestCompile_AcceptsMatchingTenantResource(t *testing.T) {
 
 func TestDecide_ConditionGating(t *testing.T) {
 	pol := policy.Policy{
-		TenantID: tenant,
 		Statements: []policy.Statement{{
 			Sid:        "mfa-required",
 			Effect:     policy.Allow,
@@ -290,7 +332,7 @@ func TestDecide_ConditionOperators(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			pol := policy.Policy{TenantID: tenant, Statements: []policy.Statement{{
+			pol := policy.Policy{Statements: []policy.Statement{{
 				Sid: "s", Effect: policy.Allow, Actions: []string{"file:getFile"},
 				Resources: []string{crnPattern("datalake/**")}, Conditions: test.conds,
 			}}}
@@ -303,7 +345,7 @@ func TestDecide_ConditionOperators(t *testing.T) {
 }
 
 func TestCompile_RejectsUnknownOperator(t *testing.T) {
-	pol := policy.Policy{TenantID: tenant, Statements: []policy.Statement{{
+	pol := policy.Policy{Statements: []policy.Statement{{
 		Sid: "s", Effect: policy.Allow, Actions: []string{"*"},
 		Resources:  []string{crnPattern("datalake/**")},
 		Conditions: policy.Conditions{"StringWobble": {"k": {"v"}}},

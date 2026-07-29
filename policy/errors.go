@@ -13,13 +13,15 @@ var (
 	ErrEmptyResource = errors.New("empty resource")
 )
 
+// ParseError describes why a policy document failed validation. It wraps a
+// sentinel Kind (see the Err* vars above) so callers can classify with
+// errors.Is, while the message adds the field, the offending value, and which
+// statement was at fault.
 type ParseError struct {
-	Kind   error
-	Field  string
-	Value  string
-	Detail string
-	Input  string
-	Cause  error
+	Kind      error  // sentinel kind (errors.Is target)
+	Field     string // logical field name: "effect", "actions", "resources"
+	Value     string // the offending value, when meaningful
+	Statement string // statement locator, e.g. `statement 0 ("sid")`
 }
 
 func (e *ParseError) Error() string {
@@ -29,21 +31,12 @@ func (e *ParseError) Error() string {
 		if e.Value != "" {
 			msg += fmt.Sprintf(" = %q", e.Value)
 		}
-	} else if e.Value != "" {
-		msg += fmt.Sprintf(": %q", e.Value)
 	}
-	if e.Detail != "" {
-		msg += ": " + e.Detail
-	}
-	if e.Input != "" {
-		msg += fmt.Sprintf(" (input %q)", e.Input)
+	if e.Statement != "" {
+		msg += " in " + e.Statement
 	}
 	return msg
 }
 
-func (e *ParseError) Unwrap() []error {
-	if e.Cause == nil {
-		return []error{e.Kind}
-	}
-	return []error{e.Kind, e.Cause}
-}
+// Unwrap exposes the sentinel kind so errors.Is(err, ErrInvalidEffect) etc. works.
+func (e *ParseError) Unwrap() error { return e.Kind }
