@@ -293,18 +293,12 @@ go test ./...
 
 ## Releasing
 
-Releases are automated with [release-please](https://github.com/googleapis/release-please):
-commit messages on `main` follow [Conventional Commits](https://www.conventionalcommits.org/),
-and release-please maintains a release PR with the `CHANGELOG.md` update and
-the next semantic version. Merging that PR tags and publishes the release.
+Pushing a `v*.*.*` tag creates the GitHub release with auto-generated notes
+and publishes the artifact reference to ds-coordination:
 
-- `fix: ...` → patch bump, listed under *Bug Fixes*
-- `feat: ...` → minor bump, listed under *Features*
-- `feat!: ...` or a `BREAKING CHANGE:` footer → major bump
-- `docs:`, `refactor:`, `perf:`, `deps:` are listed; `test:`, `chore:`, `ci:` are hidden
-
-Commits without a conventional prefix do not appear in the changelog and do
-not trigger a release on their own.
+```bash
+git tag v1.3.0 && git push --tags
+```
 
 ## License
 
