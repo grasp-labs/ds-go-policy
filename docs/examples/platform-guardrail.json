@@ -1,5 +1,6 @@
 {
   "id": "aic-managed-guardrail",
+  "name": "Platform guardrail",
   "version": "1.0.0",
   "statements": [
     {

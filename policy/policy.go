@@ -29,6 +29,8 @@ type Statement struct {
 
 type Policy struct {
 	ID string `json:"id"`
+	// Name is the human-readable policy name assigned by the IAM service.
+	Name string `json:"name,omitempty"`
 	// Version is the document's semantic version (e.g. "1.0.0").
 	Version    string      `json:"version"`
 	Statements []Statement `json:"statements"`

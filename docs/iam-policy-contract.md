@@ -56,6 +56,7 @@ type Values []string
 
 type Policy struct {
     ID         string      `json:"id"`
+    Name       string      `json:"name,omitempty"` // human-readable name from the IAM service
     Version    string      `json:"version"`
     Statements []Statement `json:"statements"`
 }

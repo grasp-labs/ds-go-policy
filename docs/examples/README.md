@@ -28,7 +28,8 @@ currently empty.
 ## `file-access.json`
 
 1. **`read-active-files`** — read (`getFile`/`listFiles`/`getFileContent`/`search`)
-   on any file, only when `status` is `active`.
+   on any file, only when `status` is `active` or `archived` (a key's values OR
+   together).
 2. **`write-projectx-unless-restricted`** — writes under `projectx/**`, unless
    the file's `tag.classification` is `restricted`.
 3. **`protect-projectx-secrets`** — deny every action on `projectx/secrets/**`

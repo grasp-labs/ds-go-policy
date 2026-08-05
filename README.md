@@ -111,16 +111,16 @@ statement whose context condition fails is dropped.
 turns them into predicates via `Mapping.Conditions`.
 
 Take the file-access policy from [`docs/examples/file-access.json`](./docs/examples/file-access.json):
-it allows `file:listFiles` over the whole tree where `status = "active"`, and
-denies everything under `projectx/secrets/`. Constraining it for a `listFiles`
-request yields a `WHERE` clause that narrows the query to exactly what the
-principal may see:
+it allows `file:listFiles` over the whole tree where `status` is `"active"` or
+`"archived"` (a key's values OR together), and denies everything under
+`projectx/secrets/`. Constraining it for a `listFiles` request yields a `WHERE`
+clause that narrows the query to exactly what the principal may see:
 
 ```go
 import "github.com/grasp-labs/ds-go-policy/adapter/sqlfilter"
 
 // policies for the principal (see docs/examples/file-access.json):
-//   allow file:listFiles on **                 where status = "active"
+//   allow file:listFiles on **                 where status in {"active", "archived"}
 //   deny  *              on projectx/secrets/**
 cons := engine.Constrain(policies, "file:listFiles", tenantID, nil)
 
@@ -135,10 +135,10 @@ if err != nil {
 }
 
 // where:
-//   (tenant_id = ? AND type = ? AND status = ?)
+//   (tenant_id = ? AND type = ? AND status IN (?, ?))
 //   AND NOT (tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\'))
 // args:
-//   [tenantID, "file", "active", tenantID, "file", "projectx/secrets", "projectx/secrets/%"]
+//   [tenantID, "file", "active", "archived", tenantID, "file", "projectx/secrets", "projectx/secrets/%"]
 
 db.Where(where, args...).Find(&files)
 ```

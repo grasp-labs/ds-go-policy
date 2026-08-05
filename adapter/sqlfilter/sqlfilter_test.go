@@ -142,13 +142,14 @@ func TestWhere_ResourceAttributeCondition(t *testing.T) {
 }
 
 // Mirrors the file-access example documented in the README: allow listFiles over
-// the whole tree where status="active", minus the projectx/secrets subtree.
+// the whole tree where status is "active" or "archived" (a key's values OR
+// together, rendered as IN), minus the projectx/secrets subtree.
 func TestWhere_READMEFileAccessExample(t *testing.T) {
 	pol := policy.Policy{
 		Statements: []policy.Statement{
 			{Sid: "read-active-files", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"status": {"active"}}}},
+				Conditions: policy.Conditions{"StringEquals": {"status": {"active", "archived"}}}},
 			{Sid: "protect-projectx-secrets", Effect: policy.Deny, Actions: []string{"*"},
 				Resources: []string{fmt.Sprintf("crn:%s:*:file::file:projectx/secrets/**", tenant)}},
 		},
@@ -164,12 +165,12 @@ func TestWhere_READMEFileAccessExample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Where: %v", err)
 	}
-	wantSQL := "(tenant_id = ? AND type = ? AND status = ?) " +
+	wantSQL := "(tenant_id = ? AND type = ? AND status IN (?, ?)) " +
 		"AND NOT (tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\'))"
 	if sql != wantSQL {
 		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
 	}
-	wantArgs := []any{tenant, "file", "active", tenant, "file", "projectx/secrets", "projectx/secrets/%"}
+	wantArgs := []any{tenant, "file", "active", "archived", tenant, "file", "projectx/secrets", "projectx/secrets/%"}
 	if !reflect.DeepEqual(args, wantArgs) {
 		t.Errorf("args = %#v\nwant %#v", args, wantArgs)
 	}

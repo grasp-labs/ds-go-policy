@@ -52,6 +52,9 @@ func TestExample_FileAccess(t *testing.T) {
 		wantReason string
 	}{
 		{"read active file", "file:getFile", "reports/q1.csv", map[string]string{"status": "active"}, true, "read-active-files"},
+		// status is a multi-value condition: the values OR together, so
+		// "archived" passes the same statement as "active".
+		{"read archived file", "file:getFile", "reports/q1.csv", map[string]string{"status": "archived"}, true, "read-active-files"},
 		{"read deleted file denied", "file:getFile", "reports/q1.csv", map[string]string{"status": "deleted"}, false, "implicit deny"},
 		{"write projectx unrestricted", "file:createFile", "projectx/app.json", map[string]string{"tag.classification": "internal"}, true, "write-projectx-unless-restricted"},
 		{"write projectx untagged", "file:createFile", "projectx/app.json", nil, true, "write-projectx-unless-restricted"},

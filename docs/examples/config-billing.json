@@ -1,5 +1,6 @@
 {
   "id": "pol-config-billing",
+  "name": "Config billing",
   "version": "1.0.0",
   "statements": [
     {

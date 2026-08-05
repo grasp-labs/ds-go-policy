@@ -1,5 +1,6 @@
 {
   "id": "pol-file-access",
+  "name": "File access",
   "version": "1.0.0",
   "statements": [
     {
@@ -16,7 +17,7 @@
       ],
       "conditions": {
         "StringEquals": {
-          "status": "active"
+          "status": ["active", "archived"]
         }
       }
     },
