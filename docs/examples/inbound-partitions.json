@@ -1,0 +1,23 @@
+{
+  "id": "pol-inbound-partitions",
+  "name": "Inbound partitions by org number",
+  "version": "1.0.0",
+  "statements": [
+    {
+      "sid": "inbound-by-org",
+      "effect": "allow",
+      "actions": [
+        "file:getFile",
+        "file:listFiles"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:file::file:files/inbound/**"
+      ],
+      "conditions": {
+        "StringEquals": {
+          "resource.path[2]": ["123456789", "23456788"]
+        }
+      }
+    }
+  ]
+}

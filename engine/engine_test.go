@@ -344,6 +344,114 @@ func TestDecide_ConditionOperators(t *testing.T) {
 	}
 }
 
+// resource.path[N] conditions the Nth path segment on a value set — one
+// pattern plus a value list instead of one resource pattern per partition.
+func TestDecide_ResourcePathSegmentCondition(t *testing.T) {
+	pol := policy.Policy{Statements: []policy.Statement{{
+		Sid:       "inbound-by-org",
+		Effect:    policy.Allow,
+		Actions:   []string{"file:getFile"},
+		Resources: []string{crnPattern("files/inbound/**")},
+		Conditions: policy.Conditions{
+			"StringEquals": {"resource.path[2]": {"123456789", "23456788"}},
+		},
+	}}}
+
+	decide := func(path string, ctx map[string]string) engine.Decision {
+		return engine.Decide([]policy.Policy{pol},
+			engine.Request{Action: "file:getFile", Resource: mustResource(t, path), Context: ctx})
+	}
+
+	if got := decide("files/inbound/123456789/report.csv", nil); !got.Allowed {
+		t.Errorf("org in list: got deny (%q), want allow", got.Reason)
+	}
+	if got := decide("files/inbound/23456788/report.csv", nil); !got.Allowed {
+		t.Errorf("second org in list: got deny (%q), want allow", got.Reason)
+	}
+	if got := decide("files/inbound/999999999/report.csv", nil); got.Allowed {
+		t.Errorf("org not in list: got allow, want implicit deny")
+	}
+	// Path too short: the segment is absent, so the positive operator fails.
+	if got := decide("files/inbound", nil); got.Allowed {
+		t.Errorf("missing segment: got allow, want implicit deny")
+	}
+	// The key resolves from the resource, never the context — no spoofing.
+	spoof := map[string]string{"resource.path[2]": "123456789"}
+	if got := decide("files/inbound/999999999/report.csv", spoof); got.Allowed {
+		t.Errorf("context spoof: got allow, want implicit deny")
+	}
+}
+
+// The absent-segment semantics compose with IfExists: "if there is a segment
+// at N, it must be one of these".
+func TestDecide_ResourcePathSegmentIfExists(t *testing.T) {
+	pol := policy.Policy{Statements: []policy.Statement{{
+		Sid: "inbound", Effect: policy.Allow, Actions: []string{"file:getFile"},
+		Resources: []string{crnPattern("files/inbound/**")},
+		Conditions: policy.Conditions{
+			"StringEqualsIfExists": {"resource.path[2]": {"123456789"}},
+		},
+	}}}
+	decide := func(path string) engine.Decision {
+		return engine.Decide([]policy.Policy{pol},
+			engine.Request{Action: "file:getFile", Resource: mustResource(t, path)})
+	}
+	if got := decide("files/inbound"); !got.Allowed {
+		t.Errorf("segment absent: got deny (%q), want allow (IfExists)", got.Reason)
+	}
+	if got := decide("files/inbound/123456789/x"); !got.Allowed {
+		t.Errorf("segment in set: got deny (%q), want allow", got.Reason)
+	}
+	if got := decide("files/inbound/999/x"); got.Allowed {
+		t.Errorf("segment not in set: got allow, want implicit deny")
+	}
+}
+
+// ResourcePathKey is the exported form adapters use to recognize segment keys.
+func TestResourcePathKey(t *testing.T) {
+	if n, ok := engine.ResourcePathKey("resource.path[2]"); !ok || n != 2 {
+		t.Errorf("ResourcePathKey(resource.path[2]) = %d, %v; want 2, true", n, ok)
+	}
+	if _, ok := engine.ResourcePathKey("status"); ok {
+		t.Errorf("ResourcePathKey(status) = ok, want not a segment key")
+	}
+}
+
+// The "resource." condition-key namespace is reserved: only well-formed
+// resource.path[N] keys compile; malformed ones fail closed at load time.
+func TestCompile_ResourceKeyValidation(t *testing.T) {
+	cases := []struct {
+		key   string
+		valid bool
+	}{
+		{"resource.path[0]", true},
+		{"resource.path[12]", true},
+		{"resource.path[two]", false},
+		{"resource.path[-1]", false},
+		{"resource.path[]", false},
+		{"resource.path[1", false},
+		{"resource.path", false},
+		{"resource.owner", false},
+		{"department", true}, // ordinary context key, not reserved
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			pol := policy.Policy{Statements: []policy.Statement{{
+				Sid: "s", Effect: policy.Allow, Actions: []string{"*"},
+				Resources:  []string{crnPattern("files/**")},
+				Conditions: policy.Conditions{"StringEquals": {tc.key: {"x"}}},
+			}}}
+			_, err := engine.Compile([]policy.Policy{pol})
+			if tc.valid && err != nil {
+				t.Errorf("Compile(%q) = %v, want ok", tc.key, err)
+			}
+			if !tc.valid && !errors.Is(err, engine.ErrInvalidResourceKey) {
+				t.Errorf("Compile(%q) = %v, want ErrInvalidResourceKey", tc.key, err)
+			}
+		})
+	}
+}
+
 func TestCompile_RejectsUnknownOperator(t *testing.T) {
 	pol := policy.Policy{Statements: []policy.Statement{{
 		Sid: "s", Effect: policy.Allow, Actions: []string{"*"},

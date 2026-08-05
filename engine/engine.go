@@ -124,7 +124,7 @@ func (c Compiled) Decide(r Request) Decision {
 func (s compiledStatement) applies(r Request) bool {
 	return actionMatches(s.actions, r.Action) &&
 		s.matchesResource(r.Resource) &&
-		evalConditions(s.conditions, r.Context)
+		evalConditions(s.conditions, r.Context, strings.Split(r.Resource.Resource, "/"))
 }
 
 func (s compiledStatement) matchesResource(c crn.CRN) bool {

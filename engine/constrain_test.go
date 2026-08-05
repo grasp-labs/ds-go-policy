@@ -204,6 +204,25 @@ func TestConstrain_TenantMatching(t *testing.T) {
 	}
 }
 
+// resource.path[N] keys resolve against the resource, and Constrain has none —
+// they always defer to the adapter, even if a context entry shadows the key.
+func TestConstrain_DefersResourcePathKeys(t *testing.T) {
+	pol := policy.Policy{
+		Statements: []policy.Statement{{
+			Sid: "inbound-by-org", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+			Resources:  []string{res("files/inbound/**")},
+			Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789"}}},
+		}},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", constrainTenant,
+		map[string]string{"resource.path[2]": "999999999"}) // must not resolve (or fail) from context
+
+	rm := findAllow(t, c, "files/inbound/**")
+	if got := rm.Conditions["StringEquals"]["resource.path[2]"]; len(got) != 1 || got[0] != "123456789" {
+		t.Errorf("resource.path[2] should be deferred intact, got %v", rm.Conditions)
+	}
+}
+
 // A malformed policy makes Constrain fail closed: no allow patterns.
 func TestConstrain_FailsClosedOnBadPolicy(t *testing.T) {
 	bad := policy.Policy{

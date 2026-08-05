@@ -16,6 +16,66 @@ import (
 // evaluation fail-closed (an unknown operator never silently passes).
 var ErrUnknownOperator = errors.New("unknown condition operator")
 
+// ErrInvalidResourceKey is returned by Compile when a condition key under the
+// reserved "resource." namespace is not one of the defined forms. Rejecting it
+// at load time keeps a typo (e.g. "resource.path[two]") from becoming a key
+// that silently never resolves.
+var ErrInvalidResourceKey = errors.New("invalid resource condition key")
+
+// resourceKeyPrefix reserves a condition-key namespace that the engine resolves
+// from the request resource itself — never from the caller-supplied context, so
+// it cannot be spoofed. The one defined form is:
+//
+//	resource.path[N] — the Nth segment (0-based) of the CRN resource path,
+//	                   e.g. resource.path[2] of "files/inbound/123456789/x"
+//	                   is "123456789". Out of range means the key is absent.
+//
+// It pins a path partition to a value set without enumerating one resource
+// pattern per value. At Constrain time there is no concrete resource, so these
+// keys always defer to the adapter (e.g. mapped to a column via the sqlfilter
+// Mapping.Conditions).
+const resourceKeyPrefix = "resource."
+
+// ResourcePathKey reports whether a condition key is the reserved
+// "resource.path[N]" resource-derived form and, if so, returns the 0-based
+// segment index N. Adapters use it to recognize segment conditions they can
+// express structurally (pathfilter folds them into globs; sqlfilter maps them
+// to columns like any other residual key).
+func ResourcePathKey(key string) (index int, ok bool) {
+	return pathIndex(key)
+}
+
+// pathIndex reports whether key is the reserved "resource.path[N]" form and
+// returns the 0-based segment index N.
+func pathIndex(key string) (int, bool) {
+	s, ok := strings.CutPrefix(key, "resource.path[")
+	if !ok {
+		return 0, false
+	}
+	s, ok = strings.CutSuffix(s, "]")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// conditionValue resolves one condition key: reserved resource-derived keys are
+// answered from the resource path, everything else from the context.
+func conditionValue(key string, ctx map[string]string, path []string) (string, bool) {
+	if n, ok := pathIndex(key); ok {
+		if n < len(path) {
+			return path[n], true
+		}
+		return "", false
+	}
+	v, ok := ctx[key]
+	return v, ok
+}
+
 // condFunc evaluates one operator for one key: actual is the request-context
 // value, present reports whether the key was supplied, and wants are the
 // policy's acceptable values (OR-ed together).
@@ -61,7 +121,9 @@ const ifExistsSuffix = "IfExists"
 
 // evalConditions applies conventional IAM semantics: all operators must pass, all keys under
 // an operator must pass, and a key's values OR together. Empty conditions match.
-func evalConditions(conds policy.Conditions, ctx map[string]string) bool {
+// path carries the request resource's path segments for the reserved
+// resource-derived keys (see resourceKeyPrefix).
+func evalConditions(conds policy.Conditions, ctx map[string]string, path []string) bool {
 	for op, keyVals := range conds {
 		base, ifExists := strings.CutSuffix(op, ifExistsSuffix)
 		fn, ok := conditionOps[base]
@@ -69,7 +131,7 @@ func evalConditions(conds policy.Conditions, ctx map[string]string) bool {
 			return false // defensive; Compile rejects unknown operators up front
 		}
 		for key, wants := range keyVals {
-			actual, present := ctx[key]
+			actual, present := conditionValue(key, ctx, path)
 			if !present && ifExists {
 				continue
 			}
@@ -103,6 +165,12 @@ func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred
 		}
 		for key, wants := range keyVals {
 			actual, present := ctx[key]
+			if _, isResource := pathIndex(key); isResource {
+				// Resource-derived keys resolve against the resource, and at
+				// Constrain time there is none — always defer, and never trust
+				// a context entry that shadows the reserved key.
+				present = false
+			}
 			if !present {
 				// Deferred under the original operator, IfExists suffix and
 				// all: presence is decided against the store, not the context.
@@ -124,12 +192,20 @@ func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred
 	return deferred, true
 }
 
-// validateConditions rejects unknown operators so Compile can fail closed.
+// validateConditions rejects unknown operators and malformed reserved keys so
+// Compile can fail closed.
 func validateConditions(conds policy.Conditions) error {
-	for op := range conds {
+	for op, keyVals := range conds {
 		base, _ := strings.CutSuffix(op, ifExistsSuffix)
 		if _, ok := conditionOps[base]; !ok {
 			return fmt.Errorf("%w: %q", ErrUnknownOperator, op)
+		}
+		for key := range keyVals {
+			if strings.HasPrefix(key, resourceKeyPrefix) {
+				if _, ok := pathIndex(key); !ok {
+					return fmt.Errorf("%w: %q", ErrInvalidResourceKey, key)
+				}
+			}
 		}
 	}
 	return nil

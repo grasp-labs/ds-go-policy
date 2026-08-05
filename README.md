@@ -148,6 +148,29 @@ statement only applies when `environment` is `staging`, so a caller passes
 `map[string]string{"environment": "staging"}` and the statement is kept or
 dropped before any SQL is generated.
 
+For path-addressed stores (filesystem walkers, object-store prefixing) the
+`pathfilter` adapter produces allow/deny globs instead. It also folds
+`resource.path[N]` segment conditions (see [Conditions](#conditions)) directly
+into the globs — the partitioned-listing policy from
+[`docs/examples/inbound-partitions.json`](./docs/examples/inbound-partitions.json)
+becomes one glob per allowed partition:
+
+```go
+import "github.com/grasp-labs/ds-go-policy/adapter/pathfilter"
+
+// policy (see docs/examples/inbound-partitions.json):
+//   allow file:listFiles on files/inbound/** where resource.path[2] in {"123456789", "23456788"}
+cons := engine.Constrain(policies, "file:listFiles", tenantID, nil)
+
+allow, deny, err := pathfilter.Prefixes(cons)
+// allow: ["files/inbound/123456789/**", "files/inbound/23456788/**"]
+// deny:  [] — the caller must always subtract deny globs (deny-wins)
+```
+
+Any other residual condition (e.g. a `status` stored on rows, not in the path)
+is not expressible as a glob, and `Prefixes` fails closed with
+`ErrUnsupportedCondition`.
+
 ## Concepts
 
 
@@ -238,6 +261,22 @@ Supported operators: `String*` (`Equals`, `NotEquals`, `EqualsIgnoreCase`,
 `Like`, …), `Numeric*`, `Date*` (RFC 3339), `Bool`, `IpAddress` / `NotIpAddress`,
 `Null`, and the `...IfExists` suffix. Keys are matched against the attributes the
 service supplies in `Request.Context`.
+
+One key namespace is reserved: `resource.path[N]` resolves to the Nth segment
+(0-based) of the request resource's path, taken from the resource itself —
+never from the context, so it cannot be spoofed. This pins a path partition to
+a value set without enumerating one resource pattern per value:
+
+```json
+"resources": ["crn:<tenant>:*:file::file:files/inbound/**"],
+"conditions": { "StringEquals": { "resource.path[2]": ["123456789", "23456788"] } }
+```
+
+At list time (`Constrain`) there is no concrete resource, so `resource.path[N]`
+conditions stay attached to the pattern and the adapter enforces them.
+`pathfilter` folds them into the globs (one pinned glob per allowed value, as
+above); `sqlfilter` maps them to a column via `Mapping.Conditions` and renders
+an `IN` list.
 
 ## Examples
 

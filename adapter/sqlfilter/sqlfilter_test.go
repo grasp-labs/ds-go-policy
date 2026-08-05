@@ -342,6 +342,38 @@ func TestWhere_Errors(t *testing.T) {
 	}
 }
 
+// End-to-end for a path-partition condition: resource.path[N] defers through
+// Constrain and maps to a column like any resource attribute, rendering the
+// partition's value set as an IN list.
+func TestWhere_PathSegmentConditionMappedToColumn(t *testing.T) {
+	pol := policy.Policy{
+		Statements: []policy.Statement{{
+			Sid: "inbound-by-org", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+			Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:files/inbound/**", tenant)},
+			Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789", "23456788"}}},
+		}},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, sqlfilter.Mapping{
+		Tenant:     "tenant_id",
+		Type:       "type",
+		Resource:   sqlfilter.ResourceColumn{Path: "path"},
+		Conditions: map[string]string{"resource.path[2]": "org_number"},
+	})
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	wantSQL := "tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\') AND org_number IN (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{tenant, "file", "files/inbound", "files/inbound/%", "123456789", "23456788"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %#v, want %#v", args, wantArgs)
+	}
+}
+
 // End-to-end with a platform-issued policy: engine.Constrain resolves the
 // tenant placeholder to the requesting tenant, so the adapter emits a plain
 // tenant predicate and never sees the placeholder.

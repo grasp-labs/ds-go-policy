@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
+	"github.com/grasp-labs/ds-go-policy/adapter/pathfilter"
 	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 	"github.com/grasp-labs/ds-go-policy/policy"
@@ -114,6 +116,58 @@ func TestExample_PlatformGuardrail(t *testing.T) {
 		Action: "file:getFile", Resource: file(other, "x/secrets/y")})
 	if got.Allowed || got.Reason != "aic-protect-secrets" {
 		t.Errorf("other tenant = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)
+	}
+}
+
+// TestExample_InboundPartitions exercises docs/examples/inbound-partitions.json:
+// one pattern over files/inbound/** plus a resource.path[2] value set replaces
+// one resource pattern per org number. The same document gates requests
+// (Decide) and narrows a storage walk (Constrain -> pathfilter).
+func TestExample_InboundPartitions(t *testing.T) {
+	pol := loadPolicy(t, "inbound-partitions.json")
+
+	file := func(path string) crn.CRN {
+		c, err := crn.Build(tenant, "owner-1", "file", "", "file", path)
+		if err != nil {
+			t.Fatalf("Build file CRN %q: %v", path, err)
+		}
+		return c
+	}
+
+	tests := []struct {
+		name       string
+		path       string
+		wantAllow  bool
+		wantReason string
+	}{
+		{"own org", "files/inbound/123456789/report.csv", true, "inbound-by-org"},
+		{"second org", "files/inbound/23456788/report.csv", true, "inbound-by-org"},
+		{"foreign org denied", "files/inbound/999999999/report.csv", false, "implicit deny"},
+		{"no partition segment denied", "files/inbound", false, "implicit deny"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := engine.Decide([]policy.Policy{pol},
+				engine.Request{Action: "file:getFile", Resource: file(test.path)})
+			if got.Allowed != test.wantAllow || got.Reason != test.wantReason {
+				t.Errorf("Decide(%s) = {Allowed:%v Reason:%q}, want {Allowed:%v Reason:%q}",
+					test.path, got.Allowed, got.Reason, test.wantAllow, test.wantReason)
+			}
+		})
+	}
+
+	// List path: the segment condition folds into one glob per org number.
+	cons := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
+	allow, deny, err := pathfilter.Prefixes(cons)
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	wantAllow := []string{"files/inbound/123456789/**", "files/inbound/23456788/**"}
+	if !reflect.DeepEqual(allow, wantAllow) {
+		t.Errorf("allow globs = %#v, want %#v", allow, wantAllow)
+	}
+	if deny != nil {
+		t.Errorf("deny globs = %#v, want none", deny)
 	}
 }
 

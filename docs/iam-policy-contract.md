@@ -51,6 +51,11 @@ type Statement struct {
 // (engine): operators AND, keys AND, a key's values OR. Supported operators
 // include String*, Numeric*, Date*, Bool, IpAddress/NotIpAddress, Null, and
 // the "...IfExists" suffix.
+// Keys resolve against Request.Context, except the reserved resource-derived
+// form "resource.path[N]": the Nth segment (0-based) of the request resource's
+// path, answered by the engine from the resource itself (never the context).
+// At Constrain time these keys always defer to the adapter: pathfilter folds
+// them into globs, sqlfilter maps them to a column like any residual key.
 type Conditions map[string]map[string]Values
 type Values []string
 
@@ -169,6 +174,9 @@ package pathfilter
 
 // Allowed/denied path globs derived from path-addressed CRNs,
 // for filesystem walkers / object-store prefixing.
+// Residual resource.path[N] StringEquals conditions are folded into the
+// globs (one pinned glob per allowed value); any other residual condition
+// fails closed with ErrUnsupportedCondition.
 func Prefixes(c engine.Constraints) (allow, deny []string, err error)
 ```
 

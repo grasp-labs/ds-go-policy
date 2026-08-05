@@ -72,6 +72,149 @@ func TestPrefixes_ContextOnlyConditionResolved(t *testing.T) {
 	}
 }
 
+// End-to-end for a path partition: a resource.path[N] condition defers through
+// Constrain and is folded into the globs — one pinned glob per allowed value,
+// on the allow and the deny side alike.
+func TestPrefixes_PathSegmentCondition(t *testing.T) {
+	pol := policy.Policy{
+		Statements: []policy.Statement{
+			{Sid: "inbound-by-org", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:files/inbound/**", tenant)},
+				Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789", "23456788"}}}},
+			{Sid: "blocked-org", Effect: policy.Deny, Actions: []string{"*"},
+				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:files/inbound/**", tenant)},
+				Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"987654321"}}}},
+		},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
+
+	allow, deny, err := pathfilter.Prefixes(c)
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	if want := []string{"files/inbound/123456789/**", "files/inbound/23456788/**"}; !reflect.DeepEqual(allow, want) {
+		t.Errorf("allow = %#v, want %#v", allow, want)
+	}
+	if want := []string{"files/inbound/987654321/**"}; !reflect.DeepEqual(deny, want) {
+		t.Errorf("deny = %#v, want %#v", deny, want)
+	}
+}
+
+// Pinning replaces a single-segment "*" in place.
+func TestPrefixes_PathSegmentPinsSingleWildcard(t *testing.T) {
+	c := engine.Constraints{Allow: []engine.ResourceMatch{{
+		Pattern:    pattern(t, "files/inbound/*/reports/**"),
+		Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789"}}},
+	}}}
+	allow, _, err := pathfilter.Prefixes(c)
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	if want := []string{"files/inbound/123456789/reports/**"}; !reflect.DeepEqual(allow, want) {
+		t.Errorf("allow = %#v, want %#v", allow, want)
+	}
+}
+
+// A literal segment already pins the value: the glob survives unchanged when
+// the literal is in the allowed set, and disappears when it is not.
+func TestPrefixes_PathSegmentLiteralIntersection(t *testing.T) {
+	match := func(values ...string) engine.Constraints {
+		return engine.Constraints{Allow: []engine.ResourceMatch{{
+			Pattern:    pattern(t, "files/inbound/acme/**"),
+			Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": policy.Values(values)}},
+		}}}
+	}
+	allow, _, err := pathfilter.Prefixes(match("acme", "other"))
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	if want := []string{"files/inbound/acme/**"}; !reflect.DeepEqual(allow, want) {
+		t.Errorf("literal in set: allow = %#v, want %#v", allow, want)
+	}
+	allow, _, err = pathfilter.Prefixes(match("other"))
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	if allow != nil {
+		t.Errorf("literal not in set: allow = %#v, want none", allow)
+	}
+}
+
+// An index that falls inside a trailing "**" is padded out with "*" segments.
+func TestPrefixes_PathSegmentInsideDeepWildcard(t *testing.T) {
+	c := engine.Constraints{Allow: []engine.ResourceMatch{{
+		Pattern:    pattern(t, "files/**"),
+		Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789"}}},
+	}}}
+	allow, _, err := pathfilter.Prefixes(c)
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	if want := []string{"files/*/123456789/**"}; !reflect.DeepEqual(allow, want) {
+		t.Errorf("allow = %#v, want %#v", allow, want)
+	}
+}
+
+// A condition on a segment the pattern can never reach cannot hold: the match
+// contributes nothing (fail closed, not an error).
+func TestPrefixes_PathSegmentOutOfRange(t *testing.T) {
+	c := engine.Constraints{Allow: []engine.ResourceMatch{{
+		Pattern:    pattern(t, "files/inbound"),
+		Conditions: policy.Conditions{"StringEquals": {"resource.path[3]": {"x"}}},
+	}}}
+	allow, _, err := pathfilter.Prefixes(c)
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	if allow != nil {
+		t.Errorf("allow = %#v, want none", allow)
+	}
+}
+
+// Values that can never equal one path segment are dropped; the rest pin.
+func TestPrefixes_PathSegmentValueWithSlashDropped(t *testing.T) {
+	c := engine.Constraints{Allow: []engine.ResourceMatch{{
+		Pattern:    pattern(t, "files/**"),
+		Conditions: policy.Conditions{"StringEquals": {"resource.path[1]": {"a/b", "ok"}}},
+	}}}
+	allow, _, err := pathfilter.Prefixes(c)
+	if err != nil {
+		t.Fatalf("Prefixes: %v", err)
+	}
+	if want := []string{"files/ok/**"}; !reflect.DeepEqual(allow, want) {
+		t.Errorf("allow = %#v, want %#v", allow, want)
+	}
+}
+
+// Everything the glob syntax cannot express exactly fails closed.
+func TestPrefixes_PathSegmentUnsupported(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		conds   policy.Conditions
+	}{
+		{"non-equals operator", "files/**",
+			policy.Conditions{"StringNotEquals": {"resource.path[2]": {"a"}}}},
+		{"IfExists suffix", "files/**",
+			policy.Conditions{"StringEqualsIfExists": {"resource.path[2]": {"a"}}}},
+		{"segments after deep wildcard", "files/**/logs",
+			policy.Conditions{"StringEquals": {"resource.path[2]": {"a"}}}},
+		{"wildcard in value", "files/**",
+			policy.Conditions{"StringEquals": {"resource.path[1]": {"12*"}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := engine.Constraints{Allow: []engine.ResourceMatch{{
+				Pattern:    pattern(t, tc.pattern),
+				Conditions: tc.conds,
+			}}}
+			if _, _, err := pathfilter.Prefixes(c); !errors.Is(err, pathfilter.ErrUnsupportedCondition) {
+				t.Errorf("err = %v, want ErrUnsupportedCondition", err)
+			}
+		})
+	}
+}
+
 // End-to-end: a resource-attribute condition (status) is not in context, so it
 // is deferred and the path adapter (which cannot express it) rejects it.
 func TestPrefixes_DeferredConditionRejected(t *testing.T) {

@@ -13,7 +13,9 @@ so the examples stay in sync with the implementation.
   `*` (one segment) and `**` (recursive, resource path only).
 - **Conditions** — `operator → key → values`; operators AND, keys AND, a key's
   values OR. Keys are matched against the attributes the service supplies in
-  `engine.Request.Context`.
+  `engine.Request.Context`, except the reserved `resource.path[N]` keys, which
+  the engine answers from the request resource's path itself (segment `N`,
+  0-based — never spoofable via context).
 
 ### CRN conventions
 
@@ -43,6 +45,17 @@ one document applies to every tenant it is bound to.
 
 1. **`aic-protect-secrets`** — deny every action on any `**/secrets/**` path,
    in any tenant (a guardrail that overrides tenant allows, deny-wins).
+
+## `inbound-partitions.json`
+
+Path-partitioned data (`files/inbound/{org_number}/...`) pinned to a value set
+with one pattern instead of one resource pattern per partition.
+
+1. **`inbound-by-org`** — read/list under `files/inbound/**`, only when the
+   partition segment (`resource.path[2]`) is one of the listed org numbers.
+   For listing, `pathfilter` folds the condition into one glob per org
+   (`files/inbound/123456789/**`, …); `sqlfilter` renders it as an `IN` clause
+   via `Mapping.Conditions`.
 
 ## `config-billing.json`
 
