@@ -143,6 +143,34 @@ if err != nil {
 db.Where(where, args...).Find(&files)
 ```
 
+Segments that are constant per table — the type of a per-type table (a `groups`
+table has no `type` column; the type *is* the table), an unused scope or region —
+are declared via `Mapping.Fixed` instead of a column. A pattern pinning a fixed
+segment is evaluated against the constant: it either agrees, adding no
+predicate, or names a value no row of the table can hold and selects nothing
+(so an allow over it grants nothing and a deny over it denies nothing):
+
+```go
+where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+	Tenant: "tenant_id",
+	Fixed: map[sqlfilter.Segment]string{
+		sqlfilter.SegmentScope:  "",
+		sqlfilter.SegmentRegion: "",
+		sqlfilter.SegmentType:   "group",
+	},
+	Resource: sqlfilter.ResourceColumn{ID: "id"},
+})
+// crn:{tenant}::iam::group:{id}  ->  tenant_id = ? AND id = ?
+// crn:{tenant}::iam::role:*      ->  selects nothing here (it's the roles table's grant)
+```
+
+For collections the platform publishes across tenants (managed policies, a
+global catalog) the pattern's tenant is the grant's scope, not the row's owner,
+so a tenant-column predicate would hide every public row. Setting
+`Mapping.TenantAnswered` declares the segment enforced outside the filter: no
+tenant predicate is emitted, and the service ANDs its own visibility clause
+(e.g. `owner = '<platform>'`) into the query.
+
 The context side works the same way: the config policy's `plan-write-staging-only`
 statement only applies when `environment` is `staging`, so a caller passes
 `map[string]string{"environment": "staging"}` and the statement is kept or

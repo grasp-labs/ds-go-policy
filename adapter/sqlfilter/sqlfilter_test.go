@@ -400,6 +400,124 @@ func TestWhere_PlatformPolicyResolvedByConstrain(t *testing.T) {
 	}
 }
 
+// A per-type table (here: IAM groups) has no type column — the type is the
+// table — and no scope or region dimension. Fixed declares those constants so
+// the narrow pattern "crn:{tenant}::iam::group:{id}" evaluates instead of
+// failing with ErrNoColumnForField.
+func TestWhere_FixedSegments(t *testing.T) {
+	groups := sqlfilter.Mapping{
+		Tenant: "tenant_id",
+		Fixed: map[sqlfilter.Segment]string{
+			sqlfilter.SegmentScope:  "",
+			sqlfilter.SegmentRegion: "",
+			sqlfilter.SegmentType:   "group",
+		},
+		Resource: sqlfilter.ResourceColumn{ID: "id"},
+	}
+	parse := func(s string) crn.Pattern {
+		t.Helper()
+		p, err := crn.ParsePattern(s)
+		if err != nil {
+			t.Fatalf("ParsePattern(%q): %v", s, err)
+		}
+		return p
+	}
+	group := parse(fmt.Sprintf("crn:%s::iam::group:g-123", tenant))
+	role := parse(fmt.Sprintf("crn:%s::iam::role:*", tenant))
+
+	// Agreement: the fixed segments constrain nothing beyond the constant.
+	sql, args, err := sqlfilter.Where(engine.Constraints{
+		Allow: []engine.ResourceMatch{{Pattern: group}},
+	}, groups)
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	if want := "tenant_id = ? AND id = ?"; sql != want {
+		t.Errorf("sql = %q, want %q", sql, want)
+	}
+	if !reflect.DeepEqual(args, []any{tenant, "g-123"}) {
+		t.Errorf("args = %#v", args)
+	}
+
+	// Mismatch on allow: a grant over roles selects no group row -> closed.
+	sql, args, err = sqlfilter.Where(engine.Constraints{
+		Allow: []engine.ResourceMatch{{Pattern: role}},
+	}, groups)
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	if sql != "1=0" || len(args) != 0 {
+		t.Errorf("got (%q, %v), want (\"1=0\", [])", sql, args)
+	}
+
+	// Mismatch on deny: a deny over roles denies no group row -> allow alone.
+	sql, args, err = sqlfilter.Where(engine.Constraints{
+		Allow: []engine.ResourceMatch{{Pattern: group}},
+		Deny:  []engine.ResourceMatch{{Pattern: role}},
+	}, groups)
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	if want := "tenant_id = ? AND id = ?"; sql != want {
+		t.Errorf("sql = %q, want %q", sql, want)
+	}
+	if !reflect.DeepEqual(args, []any{tenant, "g-123"}) {
+		t.Errorf("args = %#v", args)
+	}
+
+	// A pinned segment that is neither a column nor fixed still fails.
+	undeclared := groups
+	undeclared.Fixed = map[sqlfilter.Segment]string{sqlfilter.SegmentType: "group"}
+	scoped := parse(fmt.Sprintf("crn:%s:prod:iam::group:*", tenant))
+	if _, _, err := sqlfilter.Where(engine.Constraints{
+		Allow: []engine.ResourceMatch{{Pattern: scoped}},
+	}, undeclared); !errors.Is(err, sqlfilter.ErrNoColumnForField) {
+		t.Errorf("undeclared scope: err = %v, want ErrNoColumnForField", err)
+	}
+}
+
+// A platform-published collection (managed policies, a global catalog) owns
+// rows under the platform tenant while grants carry the caller's tenant, so
+// the tenant column predicate is declared answered and the service ANDs its
+// own visibility clause instead.
+func TestWhere_TenantAnswered(t *testing.T) {
+	catalog := sqlfilter.Mapping{
+		TenantAnswered: true,
+		Fixed: map[sqlfilter.Segment]string{
+			sqlfilter.SegmentScope:  "",
+			sqlfilter.SegmentRegion: "",
+			sqlfilter.SegmentType:   "managed_policy",
+		},
+		Resource: sqlfilter.ResourceColumn{ID: "id"},
+	}
+	pol := policy.Policy{
+		ID: "aic-managed",
+		Statements: []policy.Statement{
+			{Sid: "read-managed", Effect: policy.Allow, Actions: []string{"iam:listManagedPolicies"},
+				Resources: []string{fmt.Sprintf("crn:%s::iam::managed_policy:*", crn.PlatformTenant)}},
+		},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "iam:listManagedPolicies", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, catalog)
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	// Every segment is answered or fixed: the grant covers the whole table,
+	// within the visibility clause the service supplies itself.
+	if sql != "1=1" || len(args) != 0 {
+		t.Errorf("got (%q, %v), want (\"1=1\", [])", sql, args)
+	}
+
+	// Declaring a tenant column and TenantAnswered together is contradictory
+	// and must fail rather than silently skip the predicate.
+	conflicted := catalog
+	conflicted.Tenant = "tenant_id"
+	if _, _, err := sqlfilter.Where(c, conflicted); !errors.Is(err, sqlfilter.ErrTenantConflict) {
+		t.Errorf("tenant conflict: err = %v, want ErrTenantConflict", err)
+	}
+}
+
 func TestWhere_LikeEscaping(t *testing.T) {
 	// A prefix containing LIKE metacharacters must be escaped.
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{Pattern: pattern(t, "a_b%c/**")}}}

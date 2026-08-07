@@ -161,6 +161,8 @@ package sqlfilter
 // Maps CRN segments to columns for one table.
 type Mapping struct {
     Tenant, Scope, Region, Type string // column names (Scope -> owner_id/owners)
+    TenantAnswered bool                // tenant enforced outside the filter (platform-published tables)
+    Fixed      map[Segment]string      // segments constant per table (e.g. Type "group" for a groups table)
     Resource   ResourceColumn          // id column and/or path column
     Conditions map[string]string       // residual condition key -> column (e.g. "department" -> "dept")
 }

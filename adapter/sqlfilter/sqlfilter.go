@@ -2,6 +2,14 @@
 // service ANDs into its list/query for the current principal. It only narrows:
 // it emits the allow patterns OR-ed together, minus the deny patterns
 // (deny-wins), scoped to the columns the service provides via Mapping.
+//
+// A CRN segment a table stores per row maps to a column; a segment every row
+// of the table shares — the type of a per-type table, an unused scope — is
+// declared constant via Mapping.Fixed. A pattern pinning a fixed segment is
+// evaluated against the constant instead of translated: it either agrees, and
+// constrains nothing beyond it, or names a value no row of the table can hold,
+// and selects nothing. A pattern that pins a segment the Mapping neither
+// stores nor fixes fails rather than being silently widened.
 package sqlfilter
 
 import (
@@ -20,9 +28,14 @@ var (
 	// ErrTenantColumnRequired is returned when Mapping.Tenant is empty. Tenant
 	// scoping is mandatory — omitting it would allow cross-tenant rows.
 	ErrTenantColumnRequired = errors.New("sqlfilter: tenant column is required")
+	// ErrTenantConflict is returned when Mapping sets both Tenant and
+	// TenantAnswered. The two contradict — one emits the tenant predicate, the
+	// other declares it enforced outside the filter — and guessing which the
+	// service meant could drop a predicate it relies on.
+	ErrTenantConflict = errors.New("sqlfilter: Tenant column and TenantAnswered are mutually exclusive")
 	// ErrNoColumnForField is returned when a pattern constrains a field to a
-	// literal but Mapping has no column for it. Silently dropping the predicate
-	// would over-grant, so this fails instead.
+	// literal but Mapping neither stores it in a column nor declares it fixed.
+	// Silently dropping the predicate would over-grant, so this fails instead.
 	ErrNoColumnForField = errors.New("sqlfilter: no column mapped for a constrained field")
 	// ErrUnsupportedPattern is returned for resource patterns that cannot be
 	// expressed exactly in SQL (e.g. a mid-path single-segment wildcard).
@@ -35,6 +48,16 @@ var (
 	ErrUnsupportedCondition = errors.New("sqlfilter: condition cannot be expressed as SQL")
 )
 
+// Segment names a flat CRN segment whose value a Mapping can pin to a constant
+// via Fixed.
+type Segment int
+
+const (
+	SegmentScope Segment = iota
+	SegmentRegion
+	SegmentType
+)
+
 // ResourceColumn maps the CRN resource segment onto storage columns. Provide the
 // ID column for id-addressed resources, the Path column for path-addressed ones,
 // or both — the adapter picks based on the pattern.
@@ -43,27 +66,54 @@ type ResourceColumn struct {
 	Path string
 }
 
-// Mapping maps CRN segments to one table's columns. Tenant is required; leave a
-// column empty only if you never constrain that field to a literal.
+// Mapping maps CRN segments to one table's columns.
+//
+// Tenant is the column holding the owning tenant and is required, unless
+// TenantAnswered declares the segment enforced outside the filter (setting
+// both is contradictory and fails with ErrTenantConflict). Set
+// TenantAnswered only for collections the platform publishes across tenants
+// (managed policies, a global catalog): there the pattern's tenant is the
+// grant's scope, not the row's owner, and an owner-column predicate would hide
+// every public row from a caller plainly allowed to read it. engine.Constrain
+// has already dropped foreign-tenant patterns and resolved the platform
+// placeholder to the caller, so skipping the predicate never widens beyond the
+// caller's grant — but the service must still AND its own visibility clause
+// (e.g. owner = platform) into the query.
+//
+// Scope, Region and Type are columns for segments that vary per row; leave one
+// empty only if you never constrain that segment to a literal. Fixed instead
+// carries the segments every row of the table shares — for a table of groups,
+// the type "group" and an empty scope and region. A pattern pinning a fixed
+// segment either agrees with the constant (nothing to narrow) or selects no
+// row of this table. A segment that is neither a column nor fixed cannot be
+// evaluated, and a pattern pinning it fails with ErrNoColumnForField rather
+// than being silently ignored. If a segment is both a column and fixed, the
+// column wins.
 //
 // Conditions maps a residual condition key (a resource attribute left by
 // engine.Constrain, e.g. "department") to the column that stores it. Keys not
 // listed here cannot be expressed and cause ErrUnsupportedCondition — principal
 // or request attributes should instead be resolved via the Constrain context.
 type Mapping struct {
-	Tenant     string
-	Scope      string
-	Region     string
-	Type       string
-	Resource   ResourceColumn
-	Conditions map[string]string
+	Tenant         string
+	TenantAnswered bool
+	Scope          string
+	Region         string
+	Type           string
+	Fixed          map[Segment]string
+	Resource       ResourceColumn
+	Conditions     map[string]string
 }
 
 // Where returns a clause (with ? placeholders and positional args) to AND into a
-// query. With no allow patterns it returns "1=0" (the principal sees nothing).
+// query. With no allow patterns — none granted, or none selecting a row of this
+// table — it returns "1=0" (the principal sees nothing).
 func Where(c engine.Constraints, m Mapping) (string, []any, error) {
-	if m.Tenant == "" {
+	if m.Tenant == "" && !m.TenantAnswered {
 		return "", nil, ErrTenantColumnRequired
+	}
+	if m.Tenant != "" && m.TenantAnswered {
+		return "", nil, ErrTenantConflict
 	}
 	allowSQL, allowArgs, err := orGroups(c.Allow, m)
 	if err != nil {
@@ -82,13 +132,20 @@ func Where(c engine.Constraints, m Mapping) (string, []any, error) {
 	return fmt.Sprintf("(%s) AND NOT (%s)", allowSQL, denySQL), append(allowArgs, denyArgs...), nil
 }
 
+// orGroups OR-s one predicate group per pattern. A pattern that selects no row
+// in this table contributes nothing, which is exact for either effect: an allow
+// over rows that cannot exist grants nothing, and a deny over them denies
+// nothing.
 func orGroups(matches []engine.ResourceMatch, m Mapping) (string, []any, error) {
 	var groups []string
 	var args []any
 	for _, rm := range matches {
-		g, gArgs, err := group(rm, m)
+		g, gArgs, ok, err := group(rm, m)
 		if err != nil {
 			return "", nil, err
+		}
+		if !ok {
+			continue
 		}
 		groups = append(groups, g)
 		args = append(args, gArgs...)
@@ -103,41 +160,58 @@ func orGroups(matches []engine.ResourceMatch, m Mapping) (string, []any, error) 
 	}
 }
 
-func group(rm engine.ResourceMatch, m Mapping) (string, []any, error) {
+// group turns one pattern into the AND of its segment predicates. The bool
+// reports whether the pattern can select a row of this table at all.
+func group(rm engine.ResourceMatch, m Mapping) (string, []any, bool, error) {
 	p := rm.Pattern
+	var preds []string
+	var args []any
 	// Tenant is always constrained (never a wildcard); engine.Constrain has
-	// already resolved the platform placeholder to a concrete tenant.
-	preds := []string{m.Tenant + " = ?"}
-	args := []any{p.Tenant()}
+	// already resolved the platform placeholder to a concrete tenant. With
+	// TenantAnswered the service enforces the segment itself (see Mapping).
+	if !m.TenantAnswered {
+		preds = append(preds, m.Tenant+" = ?")
+		args = append(args, p.Tenant())
+	}
 
-	for _, f := range []struct{ col, val string }{
-		{m.Scope, p.Scope()},
-		{m.Region, p.Region()},
-		{m.Type, p.Type()},
+	for _, f := range []struct {
+		segment  Segment
+		col, val string
+	}{
+		{SegmentScope, m.Scope, p.Scope()},
+		{SegmentRegion, m.Region, p.Region()},
+		{SegmentType, m.Type, p.Type()},
 	} {
 		if f.val == crn.Wildcard {
 			continue // "*" matches any value (Decide: matchField("*", …) is always true)
 		}
-		if f.col == "" {
-			// An empty segment is region-agnostic. With no column there is
-			// nothing to filter (all rows share the absent dimension), so it is
-			// unconstrained. A non-empty literal with no column would be dropped
-			// silently and over-grant, so that fails instead.
-			if f.val == "" {
-				continue
-			}
-			return "", nil, ErrNoColumnForField
+		if f.col != "" {
+			// Empty is a literal here: Decide matches it only against an empty
+			// value, so emit equality to "" rather than skipping (skipping would
+			// match every value and grant more than Decide).
+			preds = append(preds, f.col+" = ?")
+			args = append(args, f.val)
+			continue
 		}
-		// Empty is a literal here: Decide matches it only against an empty value,
-		// so emit equality to "" rather than skipping (skipping would match every
-		// value and grant more than Decide).
-		preds = append(preds, f.col+" = ?")
-		args = append(args, f.val)
+		if fixed, declared := m.Fixed[f.segment]; declared {
+			if f.val != fixed {
+				return "", nil, false, nil // no row of this table can match
+			}
+			continue // agrees with the table's constant; nothing to narrow
+		}
+		// An empty segment is region-agnostic. With no column there is nothing
+		// to filter (all rows share the absent dimension), so it is
+		// unconstrained. A non-empty literal with neither column nor constant
+		// would be dropped silently and over-grant, so that fails instead.
+		if f.val == "" {
+			continue
+		}
+		return "", nil, false, ErrNoColumnForField
 	}
 
 	rp, rArgs, err := resourcePred(p.Resource(), m.Resource)
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
 	if rp != "" {
 		preds = append(preds, rp)
@@ -146,12 +220,17 @@ func group(rm engine.ResourceMatch, m Mapping) (string, []any, error) {
 
 	cp, cArgs, err := conditionPreds(rm.Conditions, m)
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
 	preds = append(preds, cp...)
 	args = append(args, cArgs...)
 
-	return strings.Join(preds, " AND "), args, nil
+	if len(preds) == 0 {
+		// Every segment agreed with a constant or was a wildcard: the pattern
+		// covers the whole table (within the service's own visibility clause).
+		return "1=1", nil, true, nil
+	}
+	return strings.Join(preds, " AND "), args, true, nil
 }
 
 func resourcePred(res string, col ResourceColumn) (string, []any, error) {
