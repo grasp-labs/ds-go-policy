@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/grasp-labs/ds-go-policy/conditionkey"
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
@@ -15,6 +17,11 @@ import (
 // operator the engine does not implement. Failing at compile time keeps
 // evaluation fail-closed (an unknown operator never silently passes).
 var ErrUnknownOperator = errors.New("unknown condition operator")
+
+// ErrNoConditionKeys is returned by Compile when a condition operator has no
+// keys. An empty operator would otherwise evaluate as true and partial
+// evaluation could turn a conditional statement into an unconditional grant.
+var ErrNoConditionKeys = errors.New("condition operator has no keys")
 
 // ErrInvalidResourceKey is returned by Compile when a condition key under the
 // reserved "resource." namespace is not one of the defined forms. Rejecting it
@@ -88,36 +95,34 @@ type condFunc func(actual string, present bool, wants []string) bool
 // Every operator additionally supports the "...IfExists" suffix (handled in
 // evalConditions), which passes when the key is absent.
 var conditionOps = map[string]condFunc{
-	"StringEquals":              opStringEquals,
-	"StringNotEquals":           not(opStringEquals),
-	"StringEqualsIgnoreCase":    opStringEqualsIgnoreCase,
-	"StringNotEqualsIgnoreCase": not(opStringEqualsIgnoreCase),
-	"StringLike":                opStringLike,
-	"StringNotLike":             not(opStringLike),
+	conditionoperator.StringEquals:              opStringEquals,
+	conditionoperator.StringNotEquals:           not(opStringEquals),
+	conditionoperator.StringEqualsIgnoreCase:    opStringEqualsIgnoreCase,
+	conditionoperator.StringNotEqualsIgnoreCase: not(opStringEqualsIgnoreCase),
+	conditionoperator.StringLike:                opStringLike,
+	conditionoperator.StringNotLike:             not(opStringLike),
 
-	"Bool": opBool,
+	conditionoperator.Bool: opBool,
 
-	"NumericEquals":            numeric(func(a, b float64) bool { return a == b }),
-	"NumericNotEquals":         not(numeric(func(a, b float64) bool { return a == b })),
-	"NumericLessThan":          numeric(func(a, b float64) bool { return a < b }),
-	"NumericLessThanEquals":    numeric(func(a, b float64) bool { return a <= b }),
-	"NumericGreaterThan":       numeric(func(a, b float64) bool { return a > b }),
-	"NumericGreaterThanEquals": numeric(func(a, b float64) bool { return a >= b }),
+	conditionoperator.NumericEquals:            numeric(func(a, b float64) bool { return a == b }),
+	conditionoperator.NumericNotEquals:         not(numeric(func(a, b float64) bool { return a == b })),
+	conditionoperator.NumericLessThan:          numeric(func(a, b float64) bool { return a < b }),
+	conditionoperator.NumericLessThanEquals:    numeric(func(a, b float64) bool { return a <= b }),
+	conditionoperator.NumericGreaterThan:       numeric(func(a, b float64) bool { return a > b }),
+	conditionoperator.NumericGreaterThanEquals: numeric(func(a, b float64) bool { return a >= b }),
 
-	"DateEquals":            dateCmp(func(a, b time.Time) bool { return a.Equal(b) }),
-	"DateNotEquals":         not(dateCmp(func(a, b time.Time) bool { return a.Equal(b) })),
-	"DateLessThan":          dateCmp(func(a, b time.Time) bool { return a.Before(b) }),
-	"DateLessThanEquals":    dateCmp(func(a, b time.Time) bool { return !a.After(b) }),
-	"DateGreaterThan":       dateCmp(func(a, b time.Time) bool { return a.After(b) }),
-	"DateGreaterThanEquals": dateCmp(func(a, b time.Time) bool { return !a.Before(b) }),
+	conditionoperator.DateEquals:            dateCmp(func(a, b time.Time) bool { return a.Equal(b) }),
+	conditionoperator.DateNotEquals:         not(dateCmp(func(a, b time.Time) bool { return a.Equal(b) })),
+	conditionoperator.DateLessThan:          dateCmp(func(a, b time.Time) bool { return a.Before(b) }),
+	conditionoperator.DateLessThanEquals:    dateCmp(func(a, b time.Time) bool { return !a.After(b) }),
+	conditionoperator.DateGreaterThan:       dateCmp(func(a, b time.Time) bool { return a.After(b) }),
+	conditionoperator.DateGreaterThanEquals: dateCmp(func(a, b time.Time) bool { return !a.Before(b) }),
 
-	"IpAddress":    opIPAddress,
-	"NotIpAddress": not(opIPAddress),
+	conditionoperator.IPAddress:    opIPAddress,
+	conditionoperator.NotIPAddress: not(opIPAddress),
 
-	"Null": opNull,
+	conditionoperator.Null: opNull,
 }
-
-const ifExistsSuffix = "IfExists"
 
 // evalConditions applies conventional IAM semantics: all operators must pass, all keys under
 // an operator must pass, and a key's values OR together. Empty conditions match.
@@ -125,7 +130,7 @@ const ifExistsSuffix = "IfExists"
 // resource-derived keys (see resourceKeyPrefix).
 func evalConditions(conds policy.Conditions, ctx map[string]string, path []string) bool {
 	for op, keyVals := range conds {
-		base, ifExists := strings.CutSuffix(op, ifExistsSuffix)
+		base, ifExists := strings.CutSuffix(op, conditionoperator.IfExistsSuffix)
 		fn, ok := conditionOps[base]
 		if !ok {
 			return false // defensive; Compile rejects unknown operators up front
@@ -158,7 +163,7 @@ func evalConditions(conds policy.Conditions, ctx map[string]string, path []strin
 // can consume it directly). Empty conditions resolve to (nil, true).
 func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred policy.Conditions, ok bool) {
 	for op, keyVals := range conds {
-		base, _ := strings.CutSuffix(op, ifExistsSuffix)
+		base, _ := strings.CutSuffix(op, conditionoperator.IfExistsSuffix)
 		fn, known := conditionOps[base]
 		if !known {
 			return nil, false // defensive; Compile rejects unknown operators up front
@@ -196,14 +201,26 @@ func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred
 // Compile can fail closed.
 func validateConditions(conds policy.Conditions) error {
 	for op, keyVals := range conds {
-		base, _ := strings.CutSuffix(op, ifExistsSuffix)
+		base, _ := strings.CutSuffix(op, conditionoperator.IfExistsSuffix)
 		if _, ok := conditionOps[base]; !ok {
 			return fmt.Errorf("%w: %q", ErrUnknownOperator, op)
+		}
+		if len(keyVals) == 0 {
+			return fmt.Errorf("%w: %q", ErrNoConditionKeys, op)
 		}
 		for key := range keyVals {
 			if strings.HasPrefix(key, resourceKeyPrefix) {
 				if _, ok := pathIndex(key); !ok {
 					return fmt.Errorf("%w: %q", ErrInvalidResourceKey, key)
+				}
+				continue
+			}
+			// Unqualified condition keys remain valid for existing request-context
+			// attributes. A colon opts a key into the shared <service>:<name>
+			// grammar, which IAM can validate when the policy is compiled.
+			if strings.Contains(key, ":") {
+				if _, err := conditionkey.Parse(key); err != nil {
+					return fmt.Errorf("invalid service-owned condition key %q: %w", key, err)
 				}
 			}
 		}

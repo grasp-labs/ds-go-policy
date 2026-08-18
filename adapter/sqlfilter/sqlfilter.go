@@ -19,10 +19,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 	"github.com/grasp-labs/ds-go-policy/policy"
 )
+
+const closedClause = "1=0"
 
 var (
 	// ErrTenantColumnRequired is returned when Mapping.Tenant is empty. Tenant
@@ -120,7 +123,7 @@ func Where(c engine.Constraints, m Mapping) (string, []any, error) {
 		return "", nil, err
 	}
 	if allowSQL == "" {
-		return "1=0", nil, nil
+		return closedClause, nil, nil
 	}
 	denySQL, denyArgs, err := orGroups(c.Deny, m)
 	if err != nil {
@@ -129,7 +132,17 @@ func Where(c engine.Constraints, m Mapping) (string, []any, error) {
 	if denySQL == "" {
 		return allowSQL, allowArgs, nil
 	}
-	return fmt.Sprintf("(%s) AND NOT (%s)", allowSQL, denySQL), append(allowArgs, denyArgs...), nil
+	// A deny applies only when its complete predicate is TRUE. SQL comparisons
+	// against NULL evaluate to UNKNOWN; that represents an absent resource
+	// attribute and must not make a positive IAM condition match. IS NOT TRUE
+	// preserves those rows while still subtracting every matching deny group.
+	return fmt.Sprintf("(%s) AND ((%s) IS NOT TRUE)", allowSQL, denySQL), append(allowArgs, denyArgs...), nil
+}
+
+// IsClosed reports whether where is the fail-closed clause returned by Where
+// when no allow pattern can select a row.
+func IsClosed(where string) bool {
+	return where == closedClause
 }
 
 // orGroups OR-s one predicate group per pattern. A pattern that selects no row
@@ -317,7 +330,7 @@ func condPred(op, col string, vals policy.Values) (string, []any, error) {
 	if len(vals) == 0 {
 		return "", nil, fmt.Errorf("%w: no values for operator %q", ErrUnsupportedCondition, op)
 	}
-	base, ifExists := strings.CutSuffix(op, "IfExists")
+	base, ifExists := strings.CutSuffix(op, conditionoperator.IfExistsSuffix)
 	pred, args, err := basePred(base, col, vals)
 	if err != nil {
 		return "", nil, err
@@ -333,43 +346,43 @@ func condPred(op, col string, vals policy.Values) (string, []any, error) {
 // approximated.
 func basePred(base, col string, vals policy.Values) (string, []any, error) {
 	switch base {
-	case "StringEquals":
+	case conditionoperator.StringEquals:
 		s, a := inPred(col, strArgs(vals))
 		return s, a, nil
-	case "StringNotEquals":
+	case conditionoperator.StringNotEquals:
 		s, a := notInPred(col, strArgs(vals))
 		return s, a, nil
-	case "StringLike":
+	case conditionoperator.StringLike:
 		s, a := likePred(col, vals, false)
 		return s, a, nil
-	case "StringNotLike":
+	case conditionoperator.StringNotLike:
 		s, a := likePred(col, vals, true)
 		return s, a, nil
-	case "Bool":
+	case conditionoperator.Bool:
 		return boolPred(col, vals)
-	case "Null":
+	case conditionoperator.Null:
 		return nullPred(col, vals)
-	case "NumericEquals":
+	case conditionoperator.NumericEquals:
 		a, err := numArgs(vals)
 		if err != nil {
 			return "", nil, err
 		}
 		s, aa := inPred(col, a)
 		return s, aa, nil
-	case "NumericNotEquals":
+	case conditionoperator.NumericNotEquals:
 		a, err := numArgs(vals)
 		if err != nil {
 			return "", nil, err
 		}
 		s, aa := notInPred(col, a)
 		return s, aa, nil
-	case "NumericLessThan":
+	case conditionoperator.NumericLessThan:
 		return numCmp(col, "<", vals)
-	case "NumericLessThanEquals":
+	case conditionoperator.NumericLessThanEquals:
 		return numCmp(col, "<=", vals)
-	case "NumericGreaterThan":
+	case conditionoperator.NumericGreaterThan:
 		return numCmp(col, ">", vals)
-	case "NumericGreaterThanEquals":
+	case conditionoperator.NumericGreaterThanEquals:
 		return numCmp(col, ">=", vals)
 	default:
 		return "", nil, fmt.Errorf("%w: operator %q not translatable to SQL", ErrUnsupportedCondition, base)
@@ -453,11 +466,11 @@ func boolPred(col string, vals policy.Values) (string, []any, error) {
 // "false" ⇒ column IS NOT NULL.
 func nullPred(col string, vals policy.Values) (string, []any, error) {
 	if len(vals) != 1 {
-		return "", nil, fmt.Errorf("%w: Null takes exactly one value", ErrUnsupportedCondition)
+		return "", nil, fmt.Errorf("%w: %s takes exactly one value", ErrUnsupportedCondition, conditionoperator.Null)
 	}
 	absent, err := strconv.ParseBool(vals[0])
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: Null value %q is not boolean", ErrUnsupportedCondition, vals[0])
+		return "", nil, fmt.Errorf("%w: %s value %q is not boolean", ErrUnsupportedCondition, conditionoperator.Null, vals[0])
 	}
 	if absent {
 		return col + " IS NULL", nil, nil

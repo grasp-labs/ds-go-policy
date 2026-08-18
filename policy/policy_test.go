@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
@@ -21,8 +22,8 @@ func TestConditionsUnmarshal(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 	want := policy.Conditions{
-		"StringEquals": {"dept": {"eng"}},
-		"IpAddress":    {"ip": {"10.0.0.0/8", "192.168.0.0/16"}},
+		conditionoperator.StringEquals: {"dept": {"eng"}},
+		conditionoperator.IPAddress:    {"ip": {"10.0.0.0/8", "192.168.0.0/16"}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Conditions = %#v, want %#v", got, want)

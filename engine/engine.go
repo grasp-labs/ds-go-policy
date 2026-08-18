@@ -171,6 +171,26 @@ type Constraints struct {
 	Deny  []ResourceMatch // must be subtracted by the adapter (deny-wins)
 }
 
+// Filter returns constraints containing only resource matches accepted by
+// predicate. It filters Allow and Deny symmetrically, preserves their order,
+// and does not reuse either input slice.
+func (c Constraints) Filter(predicate func(ResourceMatch) bool) Constraints {
+	return Constraints{
+		Allow: filterResourceMatches(c.Allow, predicate),
+		Deny:  filterResourceMatches(c.Deny, predicate),
+	}
+}
+
+func filterResourceMatches(matches []ResourceMatch, predicate func(ResourceMatch) bool) []ResourceMatch {
+	var filtered []ResourceMatch
+	for _, match := range matches {
+		if predicate(match) {
+			filtered = append(filtered, match)
+		}
+	}
+	return filtered
+}
+
 // Constrain is the pure-function entry point. On a compile error it fails closed
 // (returns empty constraints, i.e. no allow patterns → the adapter grants
 // nothing). Use Compile + Compiled.Constrain to surface errors explicitly.

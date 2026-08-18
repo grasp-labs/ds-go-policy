@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/grasp-labs/ds-go-policy/adapter/pathfilter"
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 	"github.com/grasp-labs/ds-go-policy/policy"
@@ -57,7 +58,7 @@ func TestPrefixes_ContextOnlyConditionResolved(t *testing.T) {
 		Statements: []policy.Statement{
 			{Sid: "team", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:datalake/**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"engineering"}}}},
 		},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant,
@@ -80,10 +81,10 @@ func TestPrefixes_PathSegmentCondition(t *testing.T) {
 		Statements: []policy.Statement{
 			{Sid: "inbound-by-org", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:files/inbound/**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789", "23456788"}}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": {"123456789", "23456788"}}}},
 			{Sid: "blocked-org", Effect: policy.Deny, Actions: []string{"*"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:files/inbound/**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"987654321"}}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": {"987654321"}}}},
 		},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
@@ -104,7 +105,7 @@ func TestPrefixes_PathSegmentCondition(t *testing.T) {
 func TestPrefixes_PathSegmentPinsSingleWildcard(t *testing.T) {
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "files/inbound/*/reports/**"),
-		Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789"}}},
+		Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": {"123456789"}}},
 	}}}
 	allow, _, err := pathfilter.Prefixes(c)
 	if err != nil {
@@ -121,7 +122,7 @@ func TestPrefixes_PathSegmentLiteralIntersection(t *testing.T) {
 	match := func(values ...string) engine.Constraints {
 		return engine.Constraints{Allow: []engine.ResourceMatch{{
 			Pattern:    pattern(t, "files/inbound/acme/**"),
-			Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": policy.Values(values)}},
+			Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": policy.Values(values)}},
 		}}}
 	}
 	allow, _, err := pathfilter.Prefixes(match("acme", "other"))
@@ -144,7 +145,7 @@ func TestPrefixes_PathSegmentLiteralIntersection(t *testing.T) {
 func TestPrefixes_PathSegmentInsideDeepWildcard(t *testing.T) {
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "files/**"),
-		Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789"}}},
+		Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": {"123456789"}}},
 	}}}
 	allow, _, err := pathfilter.Prefixes(c)
 	if err != nil {
@@ -160,7 +161,7 @@ func TestPrefixes_PathSegmentInsideDeepWildcard(t *testing.T) {
 func TestPrefixes_PathSegmentOutOfRange(t *testing.T) {
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "files/inbound"),
-		Conditions: policy.Conditions{"StringEquals": {"resource.path[3]": {"x"}}},
+		Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[3]": {"x"}}},
 	}}}
 	allow, _, err := pathfilter.Prefixes(c)
 	if err != nil {
@@ -175,7 +176,7 @@ func TestPrefixes_PathSegmentOutOfRange(t *testing.T) {
 func TestPrefixes_PathSegmentValueWithSlashDropped(t *testing.T) {
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "files/**"),
-		Conditions: policy.Conditions{"StringEquals": {"resource.path[1]": {"a/b", "ok"}}},
+		Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[1]": {"a/b", "ok"}}},
 	}}}
 	allow, _, err := pathfilter.Prefixes(c)
 	if err != nil {
@@ -194,13 +195,13 @@ func TestPrefixes_PathSegmentUnsupported(t *testing.T) {
 		conds   policy.Conditions
 	}{
 		{"non-equals operator", "files/**",
-			policy.Conditions{"StringNotEquals": {"resource.path[2]": {"a"}}}},
+			policy.Conditions{conditionoperator.StringNotEquals: {"resource.path[2]": {"a"}}}},
 		{"IfExists suffix", "files/**",
-			policy.Conditions{"StringEqualsIfExists": {"resource.path[2]": {"a"}}}},
+			policy.Conditions{conditionoperator.WithIfExists(conditionoperator.StringEquals): {"resource.path[2]": {"a"}}}},
 		{"segments after deep wildcard", "files/**/logs",
-			policy.Conditions{"StringEquals": {"resource.path[2]": {"a"}}}},
+			policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": {"a"}}}},
 		{"wildcard in value", "files/**",
-			policy.Conditions{"StringEquals": {"resource.path[1]": {"12*"}}}},
+			policy.Conditions{conditionoperator.StringEquals: {"resource.path[1]": {"12*"}}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,7 +223,7 @@ func TestPrefixes_DeferredConditionRejected(t *testing.T) {
 		Statements: []policy.Statement{
 			{Sid: "reports", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:reports/**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"status": {"active"}}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"status": {"active"}}}},
 		},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
@@ -234,7 +235,7 @@ func TestPrefixes_DeferredConditionRejected(t *testing.T) {
 func TestPrefixes_ConditionsRejected(t *testing.T) {
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "datalake/**"),
-		Conditions: policy.Conditions{"Bool": {"mfa": {"true"}}},
+		Conditions: policy.Conditions{conditionoperator.Bool: {"mfa": {"true"}}},
 	}}}
 	if _, _, err := pathfilter.Prefixes(c); !errors.Is(err, pathfilter.ErrUnsupportedCondition) {
 		t.Errorf("err = %v, want ErrUnsupportedCondition", err)

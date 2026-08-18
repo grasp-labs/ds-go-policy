@@ -38,13 +38,15 @@ operators, adapted to Commons's CRN resource identity.
 | -------------------- | ----------------------------------------------------------------- |
 | `policy`             | Data model: `Policy`, `Statement`, `Effect`, `Conditions` (JSON). |
 | `crn`                | Resource identity: parse / build / match CRNs and CRN patterns.   |
+| `conditionkey`       | Build and parse service-owned condition keys.                     |
 | `engine`             | Evaluator: `Decide` (full) and `Constrain` (partial).             |
 | `adapter/sqlfilter`  | `Constraints` → SQL `WHERE` clause.                               |
 | `adapter/pathfilter` | `Constraints` → filesystem / object-store path globs.             |
 
 
-Dependency direction is acyclic: `adapter/* → engine → {policy, crn}`. Nothing
-imports transport or storage.
+Dependency direction is acyclic:
+`adapter/* → engine → {policy, crn, conditionkey}`. Nothing imports transport
+or storage.
 
 ## Installation
 
@@ -136,7 +138,7 @@ if err != nil {
 
 // where:
 //   (tenant_id = ? AND type = ? AND status IN (?, ?))
-//   AND NOT (tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\'))
+//   AND ((tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\')) IS NOT TRUE)
 // args:
 //   [tenantID, "file", "active", "archived", tenantID, "file", "projectx/secrets", "projectx/secrets/%"]
 
@@ -289,6 +291,15 @@ Supported operators: `String*` (`Equals`, `NotEquals`, `EqualsIgnoreCase`,
 `Like`, …), `Numeric*`, `Date*` (RFC 3339), `Bool`, `IpAddress` / `NotIpAddress`,
 `Null`, and the `...IfExists` suffix. Keys are matched against the attributes the
 service supplies in `Request.Context`.
+
+Service-owned condition keys use the AWS-style `<service>:<name>` grammar, for
+example `inbound:customer:country_code`. The first colon separates the service
+namespace from the name; the opaque name may contain additional colons. The
+`conditionkey` package builds and parses that form without changing case.
+Policy compilation applies this grammar to any condition key containing `:`.
+Each service must still allowlist supported names and map the complete key to
+trusted resource data. Never derive a storage identifier directly from a
+parsed policy key.
 
 One key namespace is reserved: `resource.path[N]` resolves to the Nth segment
 (0-based) of the request resource's path, taken from the resource itself —

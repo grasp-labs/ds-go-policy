@@ -56,6 +56,11 @@ type Statement struct {
 // path, answered by the engine from the resource itself (never the context).
 // At Constrain time these keys always defer to the adapter: pathfilter folds
 // them into globs, sqlfilter maps them to a column like any residual key.
+// Services may expose condition keys in "<service>:<name>" form, for example
+// "inbound:customer:country_code". The first colon separates the service from
+// its opaque name, which may contain additional colons. The conditionkey package
+// validates that grammar at Compile time for keys containing a colon. Services
+// own the exact allowlist and trusted mapping.
 type Conditions map[string]map[string]Values
 type Values []string
 

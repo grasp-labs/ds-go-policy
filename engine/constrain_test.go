@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 	"github.com/grasp-labs/ds-go-policy/policy"
@@ -27,7 +28,7 @@ func constrainPolicy() policy.Policy {
 			{
 				Sid: "team", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{res("datalake/**")},
-				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"engineering"}}},
 			},
 			{
 				Sid: "public", Effect: policy.Allow, Actions: []string{"file:listFiles"},
@@ -36,12 +37,12 @@ func constrainPolicy() policy.Policy {
 			{
 				Sid: "reports", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{res("reports/**")},
-				Conditions: policy.Conditions{"StringEquals": {"status": {"active"}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"status": {"active"}}},
 			},
 			{
 				Sid: "protect", Effect: policy.Deny, Actions: []string{"*"},
 				Resources:  []string{res("datalake/secret/**")},
-				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"engineering"}}},
 			},
 		},
 	}
@@ -107,7 +108,7 @@ func TestConstrain_ResolvesContextOnlyConditions(t *testing.T) {
 	}
 	// reports: status not in context → deferred to the adapter.
 	rm := findAllow(t, c, "reports/**")
-	if got := rm.Conditions["StringEquals"]["status"]; len(got) != 1 || got[0] != "active" {
+	if got := rm.Conditions[conditionoperator.StringEquals]["status"]; len(got) != 1 || got[0] != "active" {
 		t.Errorf("reports/** should defer status=active, got %v", rm.Conditions)
 	}
 
@@ -144,7 +145,7 @@ func TestConstrain_NoContextDefersEverything(t *testing.T) {
 	c := engine.Constrain([]policy.Policy{constrainPolicy()}, "file:listFiles", constrainTenant, nil)
 
 	rm := findAllow(t, c, "datalake/**")
-	if got := rm.Conditions["StringEquals"]["department"]; len(got) != 1 || got[0] != "engineering" {
+	if got := rm.Conditions[conditionoperator.StringEquals]["department"]; len(got) != 1 || got[0] != "engineering" {
 		t.Errorf("datalake/** should defer department=engineering, got %v", rm.Conditions)
 	}
 	// deny is deferred (condition kept), so it still appears.
@@ -211,14 +212,14 @@ func TestConstrain_DefersResourcePathKeys(t *testing.T) {
 		Statements: []policy.Statement{{
 			Sid: "inbound-by-org", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 			Resources:  []string{res("files/inbound/**")},
-			Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789"}}},
+			Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": {"123456789"}}},
 		}},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", constrainTenant,
 		map[string]string{"resource.path[2]": "999999999"}) // must not resolve (or fail) from context
 
 	rm := findAllow(t, c, "files/inbound/**")
-	if got := rm.Conditions["StringEquals"]["resource.path[2]"]; len(got) != 1 || got[0] != "123456789" {
+	if got := rm.Conditions[conditionoperator.StringEquals]["resource.path[2]"]; len(got) != 1 || got[0] != "123456789" {
 		t.Errorf("resource.path[2] should be deferred intact, got %v", rm.Conditions)
 	}
 }
@@ -235,5 +236,23 @@ func TestConstrain_FailsClosedOnBadPolicy(t *testing.T) {
 	c := engine.Constrain([]policy.Policy{bad}, "file:listFiles", constrainTenant, nil)
 	if len(c.Allow) != 0 {
 		t.Errorf("bad policy must yield no allow patterns, got %v", allowPaths(c))
+	}
+}
+
+// An operator with no condition keys must not disappear during partial
+// evaluation and turn a conditional allow into an unconditional one.
+func TestConstrain_FailsClosedOnEmptyConditionKeyMap(t *testing.T) {
+	bad := policy.Policy{
+		ID: "empty-condition-keys",
+		Statements: []policy.Statement{{
+			Sid: "x", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+			Resources:  []string{res("datalake/**")},
+			Conditions: policy.Conditions{conditionoperator.StringEquals: {}},
+		}},
+	}
+
+	c := engine.Constrain([]policy.Policy{bad}, "file:listFiles", constrainTenant, nil)
+	if len(c.Allow) != 0 {
+		t.Errorf("empty condition key map must yield no allow patterns, got %v", allowPaths(c))
 	}
 }
