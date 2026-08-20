@@ -38,12 +38,15 @@ operators, adapted to Commons's CRN resource identity.
 | -------------------- | ----------------------------------------------------------------- |
 | `policy`             | Data model: `Policy`, `Statement`, `Effect`, `Conditions` (JSON). |
 | `crn`                | Resource identity: parse / build / match CRNs and CRN patterns.   |
+| `conditionkey`       | Build and parse service-owned condition keys.                     |
+| `conditionoperator`  | Shared names of the supported condition operators.                |
 | `engine`             | Evaluator: `Decide` (full) and `Constrain` (partial).             |
 | `adapter/sqlfilter`  | `Constraints` → SQL `WHERE` clause.                               |
 | `adapter/pathfilter` | `Constraints` → filesystem / object-store path globs.             |
 
 
-Dependency direction is acyclic: `adapter/* → engine → {policy, crn}`. Nothing
+Dependency direction is acyclic:
+`adapter/* → engine → {policy, crn, conditionkey, conditionoperator}`. Nothing
 imports transport or storage.
 
 ## Installation
@@ -84,13 +87,20 @@ if !decision.Allowed {
 }
 ```
 
-For a hot path, compile once and reuse:
+`Decide` is a one-liner: compile, then evaluate. If the policies are
+malformed it denies (fail closed) and you never see the compile error. Fine
+for tests and one-off checks.
+
+When the same policies will be reused — or you need to know *why* they
+failed to load — compile once and keep the result:
 
 ```go
-compiled, err := engine.Compile(policies) // validates + pre-parses patterns
+compiled, err := engine.Compile(policies) // once, when policies are fetched
 if err != nil {
 	// reject the policy set
 }
+
+// then, per request:
 decision := compiled.Decide(req)
 ```
 
@@ -136,19 +146,24 @@ if err != nil {
 
 // where:
 //   (tenant_id = ? AND type = ? AND status IN (?, ?))
-//   AND NOT (tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\'))
+//   AND ((tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\')) IS NOT TRUE)
 // args:
 //   [tenantID, "file", "active", "archived", tenantID, "file", "projectx/secrets", "projectx/secrets/%"]
 
 db.Where(where, args...).Find(&files)
 ```
 
-Segments that are constant per table — the type of a per-type table (a `groups`
-table has no `type` column; the type *is* the table), an unused scope or region —
-are declared via `Mapping.Fixed` instead of a column. A pattern pinning a fixed
-segment is evaluated against the constant: it either agrees, adding no
-predicate, or names a value no row of the table can hold and selects nothing
-(so an allow over it grants nothing and a deny over it denies nothing):
+Some CRN fields are not columns on this table — they are implied by the
+table itself. A `groups` table has no `type` column (every row is a group);
+`scope` and `region` may be unused. Put those constants in `Mapping.Fixed`
+instead of a column.
+
+Then a resource pattern is checked against those constants before any SQL
+is built:
+
+- it names this table (`type` is `group`) → no extra `WHERE` for that field
+- it names another table (`type` is `role`) → this query sees nothing from
+  that pattern (an allow grants nothing here; a deny denies nothing here)
 
 ```go
 where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
@@ -164,12 +179,24 @@ where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
 // crn:{tenant}::iam::role:*      ->  selects nothing here (it's the roles table's grant)
 ```
 
-For collections the platform publishes across tenants (managed policies, a
-global catalog) the pattern's tenant is the grant's scope, not the row's owner,
-so a tenant-column predicate would hide every public row. Setting
-`Mapping.TenantAnswered` declares the segment enforced outside the filter: no
-tenant predicate is emitted, and the service ANDs its own visibility clause
-(e.g. `owner = '<platform>'`) into the query.
+A platform-published table (managed policies, a global catalog) is different:
+the pattern's tenant is *who may use the grant*, not *who owns the row*. A
+`tenant_id = ?` clause would hide every public row. Set `TenantAnswered` so
+the adapter emits no tenant predicate; the service adds its own visibility:
+
+```go
+where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+	TenantAnswered: true,
+	Fixed: map[sqlfilter.Segment]string{
+		sqlfilter.SegmentScope:  "",
+		sqlfilter.SegmentRegion: "",
+		sqlfilter.SegmentType:   "managed_policy",
+	},
+	Resource: sqlfilter.ResourceColumn{ID: "id"},
+})
+// where: 1=1  — the grant covers the table; tenant is not a row filter
+db.Where(where, args...).Where("owner = ?", crn.PlatformTenant).Find(&policies)
+```
 
 The context side works the same way: the config policy's `plan-write-staging-only`
 statement only applies when `environment` is `staging`, so a caller passes
@@ -218,9 +245,8 @@ contain `:` since it is the final field.
 
 ### The platform tenant — `aic`
 
-Following the hyperscaler convention of a reserved pseudo-account, `aic` is a
-reserved token in the tenant position for **platform-issued policies usable by
-all tenants** (`crn.PlatformTenant`):
+`aic` is a reserved token in the tenant position for **platform-issued
+policies usable by all tenants** (`crn.PlatformTenant`):
 
 - In a **concrete CRN**, `aic` names a platform-owned resource.
 - In a **resource pattern**, `aic` is a placeholder for the requesting tenant:
@@ -289,6 +315,13 @@ Supported operators: `String*` (`Equals`, `NotEquals`, `EqualsIgnoreCase`,
 `Like`, …), `Numeric*`, `Date*` (RFC 3339), `Bool`, `IpAddress` / `NotIpAddress`,
 `Null`, and the `...IfExists` suffix. Keys are matched against the attributes the
 service supplies in `Request.Context`.
+
+Service-owned keys use the `<service>:<name>` grammar (first colon splits the
+service from an opaque name), e.g. `file:path_prefix:project`. Compilation
+validates the grammar; the service still owns the allowlist and the mapping to
+trusted data — never derive a storage identifier from a parsed key. The
+`conditionkey` package builds and parses that form; see
+[`docs/examples/inbound-country.json`](./docs/examples/inbound-country.json).
 
 One key namespace is reserved: `resource.path[N]` resolves to the Nth segment
 (0-based) of the request resource's path, taken from the resource itself —

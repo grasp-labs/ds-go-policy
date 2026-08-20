@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 )
@@ -63,7 +64,7 @@ func globs(matches []engine.ResourceMatch) ([]string, error) {
 func expand(rm engine.ResourceMatch) ([]string, error) {
 	out := []string{rm.Pattern.Resource()}
 	for op, keyVals := range rm.Conditions {
-		if op != "StringEquals" {
+		if op != conditionoperator.StringEquals {
 			return nil, fmt.Errorf("%w: operator %q", ErrUnsupportedCondition, op)
 		}
 		for key, values := range keyVals {

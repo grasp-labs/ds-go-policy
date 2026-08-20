@@ -7,14 +7,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// PlatformTenant is the reserved token accepted in the tenant field, following
-// the hyperscaler convention of a reserved pseudo-account. In a concrete CRN it
-// names a platform-owned resource; in a Pattern it stands for the requesting
-// tenant and matches
-// resources of any tenant, which is what lets a single platform-issued policy
-// apply to every tenant. The engine evaluates whatever documents it is given —
-// restricting who may author patterns under this token is the responsibility
-// of the policy management plane that issues and binds policies.
+// PlatformTenant is the reserved token accepted in the tenant field. In a
+// concrete CRN it names a platform-owned resource; in a Pattern it stands for
+// the requesting tenant and matches resources of any tenant, which is what
+// lets a single platform-issued policy apply to every tenant. The engine
+// evaluates whatever documents it is given — restricting who may author
+// patterns under this token is the responsibility of the policy management
+// plane that issues and binds policies.
 const PlatformTenant = "aic"
 
 // CRN is a resource identity

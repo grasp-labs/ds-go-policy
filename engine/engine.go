@@ -171,6 +171,32 @@ type Constraints struct {
 	Deny  []ResourceMatch // must be subtracted by the adapter (deny-wins)
 }
 
+// Filter returns constraints keeping only the resource matches for which
+// keep reports true. keep is a test the caller supplies, run once per match;
+// Allow and Deny are filtered the same way, their order is preserved, and
+// neither input slice is reused. For example, drop matches for a different
+// service before handing constraints to that table's adapter:
+//
+//	dbConstraints := cons.Filter(func(m ResourceMatch) bool {
+//		return m.Pattern.Service() == "file"
+//	})
+func (c Constraints) Filter(keep func(ResourceMatch) bool) Constraints {
+	return Constraints{
+		Allow: filterResourceMatches(c.Allow, keep),
+		Deny:  filterResourceMatches(c.Deny, keep),
+	}
+}
+
+func filterResourceMatches(matches []ResourceMatch, keep func(ResourceMatch) bool) []ResourceMatch {
+	var filtered []ResourceMatch
+	for _, match := range matches {
+		if keep(match) {
+			filtered = append(filtered, match)
+		}
+	}
+	return filtered
+}
+
 // Constrain is the pure-function entry point. On a compile error it fails closed
 // (returns empty constraints, i.e. no allow patterns → the adapter grants
 // nothing). Use Compile + Compiled.Constrain to surface errors explicitly.

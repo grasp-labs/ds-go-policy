@@ -4,28 +4,56 @@ Runnable policy documents for `ds-go-policy`, modeled on real Grasp APIs. Each
 `*.json` file is loaded and evaluated by tests in `engine/` (`TestExample_*`),
 so the examples stay in sync with the implementation.
 
-## Anatomy
+## What a policy looks like
 
-- **Action** — `"{service}:{operationId}"` from the service's OpenAPI, e.g.
-  `file:getFile`. Wildcards: `"file:*"` and `"*"`.
-- **Resource** — a CRN
-  `crn:{tenant}:{scope}:{service}:{region}:{type}:{resource}`. Patterns may use
-  `*` (one segment) and `**` (recursive, resource path only).
-- **Conditions** — `operator → key → values`; operators AND, keys AND, a key's
-  values OR. Keys are matched against the attributes the service supplies in
-  `engine.Request.Context`, except the reserved `resource.path[N]` keys, which
-  the engine answers from the request resource's path itself (segment `N`,
-  0-based — never spoofable via context).
+A policy is a list of statements. A statement grants (`allow`) or blocks
+(`deny`) a set of `actions` on a set of `resources`, optionally gated by
+`conditions`:
 
-### CRN conventions
+```json
+{
+  "id": "pol-file-access",
+  "version": "1.0.0",
+  "statements": [
+    {
+      "sid": "read-active-files",
+      "effect": "allow",
+      "actions": ["file:getFile", "file:listFiles"],
+      "resources": ["crn:<tenant>:*:file::file:**"],
+      "conditions": {
+        "StringEquals": { "status": ["active", "archived"] }
+      }
+    }
+  ]
+}
+```
 
-| API      | `service` | `type`                                    | `resource`  |
-| -------- | --------- | ----------------------------------------- | ----------- |
-| DS-file  | `file`    | `file`                                    | `file_path` |
-| Config   | `config`  | resource kind (`plan`, `invoice`, `model`, …) | resource `id` |
+| Field         | Value                                                                  |
+| ------------- | ---------------------------------------------------------------------- |
+| `effect`      | `allow` or `deny`.                                                     |
+| `actions`     | `"{service}:{operationId}"`, `"service:*"`, or `"*"`.                  |
+| `resources`   | CRN patterns; `*` matches one segment, `**` a whole path tail.         |
+| `conditions`  | optional `operator → key → values`; omit to match unconditionally.    |
+| `sid`         | statement label, returned as the decision reason.                     |
 
-`scope` is the owning subject/partition (`*` in these examples); `region` is
-currently empty.
+A CRN is `crn:{tenant}:{scope}:{service}:{region}:{type}:{resource}`. In these
+examples `scope` is `*` and `region` is empty; DS-file uses `service`/`type`
+`file` with the file path as `resource`, Config uses `service` `config` with
+the resource kind (`plan`, `invoice`, …) as `type` and the id as `resource`.
+
+## How it is enforced
+
+- **default-deny** — a request is denied unless some `allow` matches it.
+- **deny-wins** — any matching `deny` overrides every `allow`.
+- **a statement matches** when one of its `actions`, one of its `resources`,
+  and *all* of its `conditions` match the request.
+- **conditions** — operators AND, keys within an operator AND, a key's values
+  OR. Keys resolve three ways:
+  - a plain key (`status`) is read from `Request.Context`;
+  - `resource.path[N]` is the Nth path segment (0-based) of the resource
+    itself — answered by the engine, never spoofable via context;
+  - `<service>:<name>` (`file:path_prefix:project`) is service-owned: the
+    service resolves it from trusted data into the context.
 
 ## `file-access.json`
 
@@ -56,6 +84,17 @@ with one pattern instead of one resource pattern per partition.
    For listing, `pathfilter` folds the condition into one glob per org
    (`files/inbound/123456789/**`, …); `sqlfilter` renders it as an `IN` clause
    via `Mapping.Conditions`.
+
+## `inbound-country.json`
+
+A **service-owned condition key** in `<service>:<name>` form
+(`inbound:customer:country_code`). The Inbound service resolves it from trusted
+customer data into `Request.Context`; the engine then matches it like any other
+key. Compilation validates the grammar, but the service still owns the
+allowlist and the mapping to storage.
+
+1. **`inbound-nordic-only`** — read/list under `files/inbound/**`, only when the
+   customer's `country_code` is one of `NO`/`SE`/`DK`.
 
 ## `config-billing.json`
 

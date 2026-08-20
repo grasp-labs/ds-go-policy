@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 	"github.com/grasp-labs/ds-go-policy/policy"
@@ -284,7 +285,7 @@ func TestDecide_ConditionGating(t *testing.T) {
 			Effect:     policy.Allow,
 			Actions:    []string{"file:getFile"},
 			Resources:  []string{crnPattern("datalake/**")},
-			Conditions: policy.Conditions{"Bool": {"mfa": {"true"}}},
+			Conditions: policy.Conditions{conditionoperator.Bool: {"mfa": {"true"}}},
 		}},
 	}
 	res := mustResource(t, "datalake/x")
@@ -310,24 +311,24 @@ func TestDecide_ConditionOperators(t *testing.T) {
 		ctx   map[string]string
 		want  bool
 	}{
-		{"StringEquals hit", policy.Conditions{"StringEquals": {"dept": {"eng"}}}, map[string]string{"dept": "eng"}, true},
-		{"StringEquals miss", policy.Conditions{"StringEquals": {"dept": {"eng"}}}, map[string]string{"dept": "sales"}, false},
-		{"StringEquals multi-value OR", policy.Conditions{"StringEquals": {"dept": {"eng", "sales"}}}, map[string]string{"dept": "sales"}, true},
-		{"StringNotEquals hit", policy.Conditions{"StringNotEquals": {"dept": {"eng"}}}, map[string]string{"dept": "sales"}, true},
-		{"StringNotEquals absent is true", policy.Conditions{"StringNotEquals": {"dept": {"eng"}}}, map[string]string{}, true},
-		{"StringLike wildcard", policy.Conditions{"StringLike": {"path": {"home/*"}}}, map[string]string{"path": "home/alice"}, true},
-		{"StringLike no match", policy.Conditions{"StringLike": {"path": {"home/*"}}}, map[string]string{"path": "work/alice"}, false},
-		{"NumericLessThan", policy.Conditions{"NumericLessThan": {"n": {"10"}}}, map[string]string{"n": "5"}, true},
-		{"NumericGreaterThanEquals", policy.Conditions{"NumericGreaterThanEquals": {"n": {"10"}}}, map[string]string{"n": "10"}, true},
-		{"DateLessThan", policy.Conditions{"DateLessThan": {"t": {"2026-01-01T00:00:00Z"}}}, map[string]string{"t": "2025-06-01T00:00:00Z"}, true},
-		{"IpAddress in CIDR", policy.Conditions{"IpAddress": {"ip": {"10.0.0.0/8"}}}, map[string]string{"ip": "10.1.2.3"}, true},
-		{"IpAddress outside CIDR", policy.Conditions{"IpAddress": {"ip": {"10.0.0.0/8"}}}, map[string]string{"ip": "192.168.1.1"}, false},
-		{"Null must-be-absent", policy.Conditions{"Null": {"opt": {"true"}}}, map[string]string{}, true},
-		{"Null must-be-present", policy.Conditions{"Null": {"opt": {"false"}}}, map[string]string{"opt": "x"}, true},
-		{"IfExists passes when absent", policy.Conditions{"StringEqualsIfExists": {"dept": {"eng"}}}, map[string]string{}, true},
-		{"IfExists evaluates when present", policy.Conditions{"StringEqualsIfExists": {"dept": {"eng"}}}, map[string]string{"dept": "sales"}, false},
-		{"multiple operators AND", policy.Conditions{"StringEquals": {"dept": {"eng"}}, "Bool": {"mfa": {"true"}}}, map[string]string{"dept": "eng", "mfa": "true"}, true},
-		{"multiple operators AND one fails", policy.Conditions{"StringEquals": {"dept": {"eng"}}, "Bool": {"mfa": {"true"}}}, map[string]string{"dept": "eng", "mfa": "false"}, false},
+		{"StringEquals hit", policy.Conditions{conditionoperator.StringEquals: {"dept": {"eng"}}}, map[string]string{"dept": "eng"}, true},
+		{"StringEquals miss", policy.Conditions{conditionoperator.StringEquals: {"dept": {"eng"}}}, map[string]string{"dept": "sales"}, false},
+		{"StringEquals multi-value OR", policy.Conditions{conditionoperator.StringEquals: {"dept": {"eng", "sales"}}}, map[string]string{"dept": "sales"}, true},
+		{"StringNotEquals hit", policy.Conditions{conditionoperator.StringNotEquals: {"dept": {"eng"}}}, map[string]string{"dept": "sales"}, true},
+		{"StringNotEquals absent is true", policy.Conditions{conditionoperator.StringNotEquals: {"dept": {"eng"}}}, map[string]string{}, true},
+		{"StringLike wildcard", policy.Conditions{conditionoperator.StringLike: {"path": {"home/*"}}}, map[string]string{"path": "home/alice"}, true},
+		{"StringLike no match", policy.Conditions{conditionoperator.StringLike: {"path": {"home/*"}}}, map[string]string{"path": "work/alice"}, false},
+		{"NumericLessThan", policy.Conditions{conditionoperator.NumericLessThan: {"n": {"10"}}}, map[string]string{"n": "5"}, true},
+		{"NumericGreaterThanEquals", policy.Conditions{conditionoperator.NumericGreaterThanEquals: {"n": {"10"}}}, map[string]string{"n": "10"}, true},
+		{"DateLessThan", policy.Conditions{conditionoperator.DateLessThan: {"t": {"2026-01-01T00:00:00Z"}}}, map[string]string{"t": "2025-06-01T00:00:00Z"}, true},
+		{"IpAddress in CIDR", policy.Conditions{conditionoperator.IPAddress: {"ip": {"10.0.0.0/8"}}}, map[string]string{"ip": "10.1.2.3"}, true},
+		{"IpAddress outside CIDR", policy.Conditions{conditionoperator.IPAddress: {"ip": {"10.0.0.0/8"}}}, map[string]string{"ip": "192.168.1.1"}, false},
+		{"Null must-be-absent", policy.Conditions{conditionoperator.Null: {"opt": {"true"}}}, map[string]string{}, true},
+		{"Null must-be-present", policy.Conditions{conditionoperator.Null: {"opt": {"false"}}}, map[string]string{"opt": "x"}, true},
+		{"IfExists passes when absent", policy.Conditions{conditionoperator.WithIfExists(conditionoperator.StringEquals): {"dept": {"eng"}}}, map[string]string{}, true},
+		{"IfExists evaluates when present", policy.Conditions{conditionoperator.WithIfExists(conditionoperator.StringEquals): {"dept": {"eng"}}}, map[string]string{"dept": "sales"}, false},
+		{"multiple operators AND", policy.Conditions{conditionoperator.StringEquals: {"dept": {"eng"}}, conditionoperator.Bool: {"mfa": {"true"}}}, map[string]string{"dept": "eng", "mfa": "true"}, true},
+		{"multiple operators AND one fails", policy.Conditions{conditionoperator.StringEquals: {"dept": {"eng"}}, conditionoperator.Bool: {"mfa": {"true"}}}, map[string]string{"dept": "eng", "mfa": "false"}, false},
 	}
 
 	for _, test := range tests {
@@ -353,7 +354,7 @@ func TestDecide_ResourcePathSegmentCondition(t *testing.T) {
 		Actions:   []string{"file:getFile"},
 		Resources: []string{crnPattern("files/inbound/**")},
 		Conditions: policy.Conditions{
-			"StringEquals": {"resource.path[2]": {"123456789", "23456788"}},
+			conditionoperator.StringEquals: {"resource.path[2]": {"123456789", "23456788"}},
 		},
 	}}}
 
@@ -389,7 +390,7 @@ func TestDecide_ResourcePathSegmentIfExists(t *testing.T) {
 		Sid: "inbound", Effect: policy.Allow, Actions: []string{"file:getFile"},
 		Resources: []string{crnPattern("files/inbound/**")},
 		Conditions: policy.Conditions{
-			"StringEqualsIfExists": {"resource.path[2]": {"123456789"}},
+			conditionoperator.WithIfExists(conditionoperator.StringEquals): {"resource.path[2]": {"123456789"}},
 		},
 	}}}
 	decide := func(path string) engine.Decision {
@@ -439,7 +440,7 @@ func TestCompile_ResourceKeyValidation(t *testing.T) {
 			pol := policy.Policy{Statements: []policy.Statement{{
 				Sid: "s", Effect: policy.Allow, Actions: []string{"*"},
 				Resources:  []string{crnPattern("files/**")},
-				Conditions: policy.Conditions{"StringEquals": {tc.key: {"x"}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {tc.key: {"x"}}},
 			}}}
 			_, err := engine.Compile([]policy.Policy{pol})
 			if tc.valid && err != nil {
@@ -460,5 +461,62 @@ func TestCompile_RejectsUnknownOperator(t *testing.T) {
 	}}}
 	if _, err := engine.Compile([]policy.Policy{pol}); !errors.Is(err, engine.ErrUnknownOperator) {
 		t.Errorf("Compile err = %v, want ErrUnknownOperator", err)
+	}
+}
+
+func TestCompile_ConditionKeyMapValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		conditions policy.Conditions
+		wantErr    error
+	}{
+		{name: "no conditions"},
+		{name: "empty top-level conditions", conditions: policy.Conditions{}},
+		{
+			name:       "condition with a key",
+			conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"engineering"}}},
+		},
+		{
+			name:       "empty key map",
+			conditions: policy.Conditions{conditionoperator.StringEquals: {}},
+			wantErr:    engine.ErrNoConditionKeys,
+		},
+		{
+			name:       "nil key map",
+			conditions: policy.Conditions{conditionoperator.StringEquals: nil},
+			wantErr:    engine.ErrNoConditionKeys,
+		},
+		{
+			name: "one valid and one empty operator",
+			conditions: policy.Conditions{
+				conditionoperator.Bool:         {"mfa": {"true"}},
+				conditionoperator.StringEquals: {},
+			},
+			wantErr: engine.ErrNoConditionKeys,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pol := policy.Policy{Statements: []policy.Statement{{
+				Sid: "s", Effect: policy.Allow, Actions: []string{"*"},
+				Resources:  []string{crnPattern("datalake/**")},
+				Conditions: test.conditions,
+			}}}
+
+			_, err := engine.Compile([]policy.Policy{pol})
+			if test.wantErr == nil {
+				if err != nil {
+					t.Fatalf("Compile() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("Compile() = %v, want %v", err, test.wantErr)
+			}
+			if !errors.Is(err, engine.ErrInvalidConditions) {
+				t.Errorf("Compile() = %v, want ErrInvalidConditions", err)
+			}
+		})
 	}
 }

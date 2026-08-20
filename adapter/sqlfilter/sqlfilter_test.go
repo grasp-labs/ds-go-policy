@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/grasp-labs/ds-go-policy/adapter/sqlfilter"
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
 	"github.com/grasp-labs/ds-go-policy/crn"
 	"github.com/grasp-labs/ds-go-policy/engine"
 	"github.com/grasp-labs/ds-go-policy/policy"
@@ -45,7 +46,7 @@ func TestWhere_AllowMinusDeny(t *testing.T) {
 
 	// scope (*) and region (*) are wildcards -> no predicate; type "file" -> equality.
 	wantSQL := "(tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')) " +
-		"AND NOT (tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\'))"
+		"AND ((tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')) IS NOT TRUE)"
 	wantArgs := []any{
 		tenant, "file", "datalake", "datalake/%",
 		tenant, "file", "datalake/secret", "datalake/secret/%",
@@ -58,6 +59,42 @@ func TestWhere_AllowMinusDeny(t *testing.T) {
 	}
 }
 
+func TestWhere_DenyConditionMatchesOnlyTrue(t *testing.T) {
+	wholeCollection, err := crn.ParsePattern(fmt.Sprintf("crn:%s:*:file:*:file:**", tenant))
+	if err != nil {
+		t.Fatalf("ParsePattern: %v", err)
+	}
+
+	c := engine.Constraints{
+		Allow: []engine.ResourceMatch{{Pattern: wholeCollection}},
+		Deny: []engine.ResourceMatch{{
+			Pattern: wholeCollection,
+			Conditions: policy.Conditions{
+				conditionoperator.StringEquals: {"department": {"blocked"}},
+			},
+		}},
+	}
+	m := mapping()
+	m.Conditions = map[string]string{"department": "department"}
+
+	sql, args, err := sqlfilter.Where(c, m)
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+
+	// IS NOT TRUE is deliberate: when department is SQL NULL, the deny
+	// condition is UNKNOWN rather than TRUE, matching IAM's absent-key behavior.
+	wantSQL := "(tenant_id = ? AND type = ?) AND " +
+		"((tenant_id = ? AND type = ? AND department = ?) IS NOT TRUE)"
+	if sql != wantSQL {
+		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
+	}
+	wantArgs := []any{tenant, "file", tenant, "file", "blocked"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %#v, want %#v", args, wantArgs)
+	}
+}
+
 func TestWhere_NoAllowIsClosed(t *testing.T) {
 	sql, args, err := sqlfilter.Where(engine.Constraints{}, mapping())
 	if err != nil {
@@ -65,6 +102,12 @@ func TestWhere_NoAllowIsClosed(t *testing.T) {
 	}
 	if sql != "1=0" || len(args) != 0 {
 		t.Errorf("got (%q, %v), want (\"1=0\", [])", sql, args)
+	}
+	if !sqlfilter.IsClosed(sql) {
+		t.Errorf("IsClosed(%q) = false, want true", sql)
+	}
+	if sqlfilter.IsClosed("1=1") {
+		t.Error("IsClosed(\"1=1\") = true, want false")
 	}
 }
 
@@ -90,7 +133,7 @@ func TestWhere_ContextOnlyConditionResolved(t *testing.T) {
 		Statements: []policy.Statement{
 			{Sid: "team", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file:*:file:datalake/**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"engineering"}}}},
 		},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant,
@@ -118,7 +161,7 @@ func TestWhere_ResourceAttributeCondition(t *testing.T) {
 		Statements: []policy.Statement{
 			{Sid: "eng-files", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"department": {"engineering"}}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"engineering"}}}},
 		},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
@@ -149,7 +192,7 @@ func TestWhere_READMEFileAccessExample(t *testing.T) {
 		Statements: []policy.Statement{
 			{Sid: "read-active-files", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:**", tenant)},
-				Conditions: policy.Conditions{"StringEquals": {"status": {"active", "archived"}}}},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"status": {"active", "archived"}}}},
 			{Sid: "protect-projectx-secrets", Effect: policy.Deny, Actions: []string{"*"},
 				Resources: []string{fmt.Sprintf("crn:%s:*:file::file:projectx/secrets/**", tenant)}},
 		},
@@ -166,7 +209,7 @@ func TestWhere_READMEFileAccessExample(t *testing.T) {
 		t.Fatalf("Where: %v", err)
 	}
 	wantSQL := "(tenant_id = ? AND type = ? AND status IN (?, ?)) " +
-		"AND NOT (tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\'))"
+		"AND ((tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')) IS NOT TRUE)"
 	if sql != wantSQL {
 		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
 	}
@@ -258,19 +301,19 @@ func TestWhere_ConditionOperators(t *testing.T) {
 		wantSQL string
 		want    []any
 	}{
-		{"in-list", policy.Conditions{"StringEquals": {"department": {"eng", "ops"}}},
+		{"in-list", policy.Conditions{conditionoperator.StringEquals: {"department": {"eng", "ops"}}},
 			prefix + "dept IN (?, ?)", []any{tenant, "file", "eng", "ops"}},
-		{"not-equals", policy.Conditions{"StringNotEquals": {"department": {"eng"}}},
+		{"not-equals", policy.Conditions{conditionoperator.StringNotEquals: {"department": {"eng"}}},
 			prefix + "(dept IS NULL OR dept <> ?)", []any{tenant, "file", "eng"}},
-		{"like", policy.Conditions{"StringLike": {"env": {"prod*"}}},
+		{"like", policy.Conditions{conditionoperator.StringLike: {"env": {"prod*"}}},
 			prefix + "env LIKE ? ESCAPE '\\'", []any{tenant, "file", "prod%"}},
-		{"numeric-gt", policy.Conditions{"NumericGreaterThan": {"size": {"100"}}},
+		{"numeric-gt", policy.Conditions{conditionoperator.NumericGreaterThan: {"size": {"100"}}},
 			prefix + "size > ?", []any{tenant, "file", float64(100)}},
-		{"bool", policy.Conditions{"Bool": {"archived": {"false"}}},
+		{"bool", policy.Conditions{conditionoperator.Bool: {"archived": {"false"}}},
 			prefix + "archived = ?", []any{tenant, "file", false}},
-		{"null-true", policy.Conditions{"Null": {"owner": {"true"}}},
+		{"null-true", policy.Conditions{conditionoperator.Null: {"owner": {"true"}}},
 			prefix + "owner IS NULL", []any{tenant, "file"}},
-		{"if-exists", policy.Conditions{"StringEqualsIfExists": {"department": {"eng"}}},
+		{"if-exists", policy.Conditions{conditionoperator.WithIfExists(conditionoperator.StringEquals): {"department": {"eng"}}},
 			prefix + "(dept IS NULL OR dept = ?)", []any{tenant, "file", "eng"}},
 	}
 	for _, tc := range cases {
@@ -293,7 +336,7 @@ func TestWhere_ConditionOperators(t *testing.T) {
 func TestWhere_ConditionUnmappedKey(t *testing.T) {
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "**"),
-		Conditions: policy.Conditions{"StringEquals": {"department": {"eng"}}},
+		Conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"eng"}}},
 	}}}
 	if _, _, err := sqlfilter.Where(c, mapping()); !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
 		t.Errorf("err = %v, want ErrUnsupportedCondition", err)
@@ -306,7 +349,7 @@ func TestWhere_ConditionUnsupportedOperator(t *testing.T) {
 	m.Conditions = map[string]string{"sourceIp": "ip"}
 	c := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "**"),
-		Conditions: policy.Conditions{"IpAddress": {"sourceIp": {"10.0.0.0/8"}}},
+		Conditions: policy.Conditions{conditionoperator.IPAddress: {"sourceIp": {"10.0.0.0/8"}}},
 	}}}
 	if _, _, err := sqlfilter.Where(c, m); !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
 		t.Errorf("err = %v, want ErrUnsupportedCondition", err)
@@ -322,7 +365,7 @@ func TestWhere_Errors(t *testing.T) {
 
 	withCond := engine.Constraints{Allow: []engine.ResourceMatch{{
 		Pattern:    pattern(t, "datalake/**"),
-		Conditions: policy.Conditions{"Bool": {"mfa": {"true"}}},
+		Conditions: policy.Conditions{conditionoperator.Bool: {"mfa": {"true"}}},
 	}}}
 	if _, _, err := sqlfilter.Where(withCond, mapping()); !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
 		t.Errorf("conditions: err = %v", err)
@@ -350,7 +393,7 @@ func TestWhere_PathSegmentConditionMappedToColumn(t *testing.T) {
 		Statements: []policy.Statement{{
 			Sid: "inbound-by-org", Effect: policy.Allow, Actions: []string{"file:listFiles"},
 			Resources:  []string{fmt.Sprintf("crn:%s:*:file::file:files/inbound/**", tenant)},
-			Conditions: policy.Conditions{"StringEquals": {"resource.path[2]": {"123456789", "23456788"}}},
+			Conditions: policy.Conditions{conditionoperator.StringEquals: {"resource.path[2]": {"123456789", "23456788"}}},
 		}},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)

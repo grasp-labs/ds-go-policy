@@ -171,6 +171,43 @@ func TestExample_InboundPartitions(t *testing.T) {
 	}
 }
 
+// TestExample_InboundCountry exercises docs/examples/inbound-country.json: a
+// service-owned condition key ("inbound:customer:country_code", <service>:<name>
+// grammar) the Inbound service resolves from trusted customer data into
+// Request.Context — the engine matches it like any other key.
+func TestExample_InboundCountry(t *testing.T) {
+	pol := loadPolicy(t, "inbound-country.json")
+
+	file := func(path string) crn.CRN {
+		c, err := crn.Build(tenant, "owner-1", "file", "", "file", path)
+		if err != nil {
+			t.Fatalf("Build file CRN %q: %v", path, err)
+		}
+		return c
+	}
+
+	tests := []struct {
+		name       string
+		ctx        map[string]string
+		wantAllow  bool
+		wantReason string
+	}{
+		{"nordic customer", map[string]string{"inbound:customer:country_code": "NO"}, true, "inbound-nordic-only"},
+		{"foreign customer denied", map[string]string{"inbound:customer:country_code": "US"}, false, "implicit deny"},
+		{"missing country denied", nil, false, "implicit deny"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := engine.Decide([]policy.Policy{pol},
+				engine.Request{Action: "file:getFile", Resource: file("files/inbound/report.csv"), Context: test.ctx})
+			if got.Allowed != test.wantAllow || got.Reason != test.wantReason {
+				t.Errorf("Decide = {Allowed:%v Reason:%q}, want {Allowed:%v Reason:%q}",
+					got.Allowed, got.Reason, test.wantAllow, test.wantReason)
+			}
+		})
+	}
+}
+
 // TestExample_ConfigBilling exercises docs/examples/config-billing.json against
 // the Config API (service "config", type = resource kind, resource = id).
 func TestExample_ConfigBilling(t *testing.T) {
