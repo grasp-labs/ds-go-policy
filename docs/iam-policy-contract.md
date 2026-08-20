@@ -8,8 +8,10 @@ The security-critical logic (CRN matching, statement selection, effect resolutio
 
 ```text
 ds-go-policy/
-  policy/          # data model: Policy, Statement, Effect (JSON)
-  crn/             # CRN parse / build / match (the resource-name analog)
+  policy/            # data model: Policy, Statement, Effect (JSON)
+  crn/               # CRN parse / build / match (the resource-name analog)
+  conditionkey/      # <service>:<name> condition-key grammar
+  conditionoperator/ # shared names of the supported condition operators
   engine/          # evaluator: Decide (full) + Constrain (partial)
   adapter/
     sqlfilter/     # Constraints -> GORM/SQL WHERE
@@ -46,21 +48,8 @@ type Statement struct {
     Conditions Conditions `json:"conditions,omitempty"`
 }
 
-// Conditions mirrors the mainstream IAM condition block: operator -> key -> values.
-// Values unmarshal from a single string or an array of strings. Evaluation
-// (engine): operators AND, keys AND, a key's values OR. Supported operators
-// include String*, Numeric*, Date*, Bool, IpAddress/NotIpAddress, Null, and
-// the "...IfExists" suffix.
-// Keys resolve against Request.Context, except the reserved resource-derived
-// form "resource.path[N]": the Nth segment (0-based) of the request resource's
-// path, answered by the engine from the resource itself (never the context).
-// At Constrain time these keys always defer to the adapter: pathfilter folds
-// them into globs, sqlfilter maps them to a column like any residual key.
-// Services may expose condition keys in "<service>:<name>" form, for example
-// "inbound:customer:country_code". The first colon separates the service from
-// its opaque name, which may contain additional colons. The conditionkey package
-// validates that grammar at Compile time for keys containing a colon. Services
-// own the exact allowlist and trusted mapping.
+// Conditions is the IAM condition block: operator -> key -> values.
+// Values unmarshal from a single string or an array. See "Conditions" below.
 type Conditions map[string]map[string]Values
 type Values []string
 
@@ -71,6 +60,23 @@ type Policy struct {
     Statements []Statement `json:"statements"`
 }
 ```
+
+### Conditions
+
+Evaluation ANDs across operators, ANDs across keys within an operator, and ORs
+a key's values. Operators: `String*`, `Numeric*`, `Date*`, `Bool`,
+`IpAddress`/`NotIpAddress`, `Null`, each with an optional `...IfExists` suffix.
+
+Keys resolve three ways:
+
+- **context key** (`status`) — read from `Request.Context`.
+- **`resource.path[N]`** — the Nth path segment (0-based) of the request
+  resource, answered by the engine from the resource itself, never the context.
+  At `Constrain` time it defers to the adapter (`pathfilter` folds it into
+  globs; `sqlfilter` maps it to a column like any residual key).
+- **`<service>:<name>`** (`file:path_prefix:project`) — service-owned; the
+  first colon splits the service from an opaque name. `conditionkey` validates
+  the grammar at `Compile`; the service owns the allowlist and trusted mapping.
 
 ## `crn/` — the resource identity
 
@@ -99,9 +105,8 @@ func (p Pattern) Matches(c CRN) bool
 
 ### The platform tenant — `aic`
 
-`crn.PlatformTenant` (`"aic"`) is a reserved token in the tenant position,
-following the hyperscaler convention of a reserved pseudo-account. It marks
-**platform-issued policies usable by all tenants**: in a concrete CRN it names a platform-owned resource;
+`crn.PlatformTenant` (`"aic"`) is a reserved token in the tenant position. It
+marks **platform-issued policies usable by all tenants**: in a concrete CRN it names a platform-owned resource;
 in a pattern it is a placeholder for the requesting tenant and matches
 resources of any tenant. The engine evaluates whatever policy set the caller
 binds to a principal — restricting who may author `aic` patterns is the policy

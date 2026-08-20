@@ -17,9 +17,9 @@ func TestParse(t *testing.T) {
 			want:  Key{Service: "inbound", Name: "customer:country_code"},
 		},
 		{
-			name:  "opaque AWS-style name containing a colon",
-			input: "kms:EncryptionContext:AppName",
-			want:  Key{Service: "kms", Name: "EncryptionContext:AppName"},
+			name:  "opaque name containing a colon",
+			input: "config:tag:cost_center",
+			want:  Key{Service: "config", Name: "tag:cost_center"},
 		},
 		{
 			name:  "case is preserved",
@@ -65,7 +65,7 @@ func TestRoundTrip(t *testing.T) {
 		"inbound:customer:org_number",
 		"InboundV2:Customer-Type_External_ID",
 		"tagging:ResourceTag/owner.value",
-		"kms:EncryptionContext:AppName",
+		"config:tag:cost_center",
 	}
 
 	for _, input := range inputs {

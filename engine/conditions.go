@@ -88,10 +88,9 @@ func conditionValue(key string, ctx map[string]string, path []string) (string, b
 // policy's acceptable values (OR-ed together).
 type condFunc func(actual string, present bool, wants []string) bool
 
-// conditionOps mirrors the mainstream IAM condition operators. Each "Not"
-// variant is the negation of its positive form, which also yields the
-// conventional missing-key behavior (a negated operator is true when the key
-// is absent).
+// conditionOps holds the supported condition operators. Each "Not" variant is
+// the negation of its positive form, which also yields the expected missing-key
+// behavior (a negated operator is true when the key is absent).
 // Every operator additionally supports the "...IfExists" suffix (handled in
 // evalConditions), which passes when the key is absent.
 var conditionOps = map[string]condFunc{
@@ -124,7 +123,7 @@ var conditionOps = map[string]condFunc{
 	conditionoperator.Null: opNull,
 }
 
-// evalConditions applies conventional IAM semantics: all operators must pass, all keys under
+// evalConditions applies the condition semantics: all operators must pass, all keys under
 // an operator must pass, and a key's values OR together. Empty conditions match.
 // path carries the request resource's path segments for the reserved
 // resource-derived keys (see resourceKeyPrefix).
@@ -215,9 +214,9 @@ func validateConditions(conds policy.Conditions) error {
 				}
 				continue
 			}
-			// Unqualified condition keys remain valid for existing request-context
-			// attributes. A colon opts a key into the shared <service>:<name>
-			// grammar, which IAM can validate when the policy is compiled.
+			// A colon opts a key into the shared <service>:<name> grammar
+			// (e.g. "file:path_prefix:project"); colon-free keys are plain
+			// context attributes and pass through.
 			if strings.Contains(key, ":") {
 				if _, err := conditionkey.Parse(key); err != nil {
 					return fmt.Errorf("invalid service-owned condition key %q: %w", key, err)

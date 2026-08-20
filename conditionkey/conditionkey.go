@@ -6,9 +6,10 @@
 //
 //	<service>:<name>
 //
-// For example, "inbound:customer:country_code" identifies an Inbound-owned
-// condition key. The name may contain additional colons and is opaque to this
-// package: a service may establish its own naming convention within that part.
+// For example, "file:path_prefix:project" identifies a file-service-owned
+// condition key whose name is "path_prefix:project". The name may contain
+// additional colons and is opaque to this package: a service may establish its
+// own naming convention within that part.
 // The package validates only the key's shared structure. It does not decide
 // which keys a service supports or map keys to storage fields; callers must
 // keep that mapping explicit.

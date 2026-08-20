@@ -18,7 +18,7 @@ func TestCompileValidatesServiceOwnedConditionKeys(t *testing.T) {
 	}{
 		{name: "valid service key", key: "inbound:customer:country_code"},
 		{name: "opaque key name", key: "inbound:ResourceTag/customer.country"},
-		{name: "opaque key name containing a colon", key: "kms:EncryptionContext:AppName"},
+		{name: "opaque key name containing a colon", key: "config:tag:cost_center"},
 		{name: "legacy unqualified key", key: "department"},
 		{name: "empty service", key: ":customer:country_code", wantErr: conditionkey.ErrInvalidFormat},
 		{name: "empty key name", key: "inbound:", wantErr: conditionkey.ErrInvalidFormat},
