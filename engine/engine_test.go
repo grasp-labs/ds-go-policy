@@ -206,6 +206,91 @@ func TestCompile_ReportsError(t *testing.T) {
 	}
 }
 
+func TestCompile_ValidatesActionPatterns(t *testing.T) {
+	tests := []struct {
+		action string
+		valid  bool
+	}{
+		{action: "file:getFile", valid: true},
+		{action: "file:*", valid: true},
+		{action: "*", valid: true},
+		{action: ""},
+		{action: "file"},
+		{action: ":getFile"},
+		{action: "file:"},
+		{action: "*:getFile"},
+		{action: "file:get*"},
+		{action: "file: getFile"},
+		{action: "file:getFile:extra"},
+	}
+	for _, test := range tests {
+		if got := engine.ValidActionPattern(test.action); got != test.valid {
+			t.Errorf("ValidActionPattern(%q) = %v, want %v", test.action, got, test.valid)
+		}
+	}
+	pol := policy.Policy{Statements: []policy.Statement{{
+		Effect: policy.Allow, Actions: []string{"file:get*"}, Resources: []string{crnPattern("**")},
+	}}}
+	if _, err := engine.Compile([]policy.Policy{pol}); !errors.Is(err, engine.ErrInvalidAction) {
+		t.Fatalf("Compile() error = %v, want ErrInvalidAction", err)
+	}
+}
+
+func TestDecide_RejectsNonConcreteRequestActions(t *testing.T) {
+	pol := policy.Policy{Statements: []policy.Statement{{
+		Effect: policy.Allow, Actions: []string{"*"}, Resources: []string{crnPattern("**")},
+	}}}
+	compiled, err := engine.Compile([]policy.Policy{pol})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, action := range []string{"", "*", "file:*", "file:get*", "file:getFile:extra"} {
+		got := compiled.Decide(engine.Request{
+			Action:   action,
+			Resource: mustResource(t, "datalake/file.txt"),
+		})
+		if got.Allowed {
+			t.Errorf("Decide action %q = allowed, want implicit deny", action)
+		}
+	}
+}
+
+func TestCompile_CopiesValidatedActions(t *testing.T) {
+	pol := policy.Policy{Statements: []policy.Statement{{
+		Effect: policy.Allow, Actions: []string{"file:getFile"}, Resources: []string{crnPattern("datalake/**")},
+	}}}
+	compiled, err := engine.Compile([]policy.Policy{pol})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pol.Statements[0].Actions[0] = "*"
+	got := compiled.Decide(engine.Request{
+		Action:   "file:deleteFile",
+		Resource: mustResource(t, "datalake/file.txt"),
+	})
+	if got.Allowed {
+		t.Error("compiled policy changed after the source action was mutated")
+	}
+}
+
+func TestDecide_MatchesActionAndResourceIndependently(t *testing.T) {
+	pol := policy.Policy{Statements: []policy.Statement{{
+		Effect:    policy.Allow,
+		Actions:   []string{"file:getFile"},
+		Resources: []string{fmt.Sprintf("crn:%s:*:state::state:**", tenant)},
+	}}}
+	stateResource, err := crn.Build(tenant, owner, "state", "", "state", "job-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: stateResource})
+	if !got.Allowed {
+		t.Errorf("cross-service action/resource request denied: %s", got.Reason)
+	}
+}
+
 func TestDecide_CrossTenantResourceNeverMatches(t *testing.T) {
 	// A pattern naming another tenant compiles, but tenant isolation holds at
 	// evaluation: it can never match this tenant's resources.

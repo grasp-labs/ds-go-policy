@@ -38,8 +38,8 @@ type Policy struct {
 
 // Validate performs structural validation of a policy: every statement must
 // have a recognized effect and at least one non-empty action and resource.
-// It does not parse resource patterns (that requires the crn package and is
-// done in engine.Compile) — this keeps the policy model dependency-free.
+// It leaves action syntax, resource patterns, and conditions to engine.Compile,
+// keeping the policy model dependency-free.
 func (p Policy) Validate() error {
 	for i, s := range p.Statements {
 		where := fmt.Sprintf("statement %d (%q)", i, s.Sid)

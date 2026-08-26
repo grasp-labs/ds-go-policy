@@ -151,11 +151,11 @@ func evalConditions(conds policy.Conditions, ctx map[string]string, path []strin
 // context (e.g. principal/request attributes available at list time). It splits
 // each condition key into "resolved now" vs "deferred":
 //
-//   - If the key is present in ctx, it is evaluated immediately. If that check
-//     fails, ok is false and the whole statement does not apply to this
-//     principal (the caller drops it).
-//   - If the key is absent from ctx, the condition is a resource attribute the
-//     store must enforce, so it is copied into deferred for the adapter.
+//   - A non-reserved key present in ctx is evaluated immediately; a failed
+//     check drops the statement.
+//   - An absent non-reserved key is deferred to the adapter.
+//   - resource.path[N] is always deferred because Constrain has no concrete
+//     resource and caller-supplied context must not shadow a reserved key.
 //
 // When ok is true and deferred is nil, every condition was satisfied by the
 // context and the resulting pattern carries no residual conditions (adapters
@@ -196,8 +196,8 @@ func resolveConditions(conds policy.Conditions, ctx map[string]string) (deferred
 	return deferred, true
 }
 
-// validateConditions rejects unknown operators and malformed reserved keys so
-// Compile can fail closed.
+// validateConditions rejects unknown operators, operators with no keys, empty
+// keys, and malformed reserved or service-owned keys so Compile can fail closed.
 func validateConditions(conds policy.Conditions) error {
 	for op, keyVals := range conds {
 		base, _ := strings.CutSuffix(op, conditionoperator.IfExistsSuffix)
@@ -208,16 +208,17 @@ func validateConditions(conds policy.Conditions) error {
 			return fmt.Errorf("%w: %q", ErrNoConditionKeys, op)
 		}
 		for key := range keyVals {
-			if strings.HasPrefix(key, resourceKeyPrefix) {
+			// resource.* is reserved. Non-empty colon-free keys are plain context
+			// attributes; keys containing a colon must follow <service>:<name>.
+			switch {
+			case key == "":
+				_, err := conditionkey.Parse(key)
+				return fmt.Errorf("invalid condition key %q: %w", key, err)
+			case strings.HasPrefix(key, resourceKeyPrefix):
 				if _, ok := pathIndex(key); !ok {
 					return fmt.Errorf("%w: %q", ErrInvalidResourceKey, key)
 				}
-				continue
-			}
-			// A colon opts a key into the shared <service>:<name> grammar
-			// (e.g. "file:path_prefix:project"); colon-free keys are plain
-			// context attributes and pass through.
-			if strings.Contains(key, ":") {
+			case strings.Contains(key, ":"):
 				if _, err := conditionkey.Parse(key); err != nil {
 					return fmt.Errorf("invalid service-owned condition key %q: %w", key, err)
 				}

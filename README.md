@@ -23,9 +23,8 @@ caller resolves which policies apply to a principal and passes them in; the
 engine has no storage, HTTP, or transport dependencies.
 - **Deny-wins, default-deny.** Any matching `deny` overrides every `allow`, and
 nothing is permitted unless explicitly allowed.
-- **Fail closed.** Policies are validated and compiled up front; malformed
-effects, unparseable resource patterns, and unknown condition operators are
-rejected rather than silently skipped.
+- **Fail closed.** `Compile` rejects malformed policies, action and resource
+  patterns, and conditions rather than silently skipping them.
 - **Familiar semantics** for actions, resource wildcards, and condition
 operators, adapted to Commons's CRN resource identity.
 
@@ -77,13 +76,13 @@ if err != nil {
 }
 
 decision := engine.Decide(policies, engine.Request{
-	Action:   "file:updateFile", // "{service}:{operationId}"
+	Action:   "file:updateFile", // "{service}:{operation}"
 	Resource: resource,
 	Context:  map[string]string{"tag.classification": "internal"},
 })
 
 if !decision.Allowed {
-	// deny: decision.Reason is the matching statement Sid or "implicit deny"
+	// deny: decision.Reason is the matching Sid or a fallback reason
 }
 ```
 
@@ -117,8 +116,13 @@ by where their data lives:
 in the config policy) are passed in the `context` and resolved up front — a
 statement whose context condition fails is dropped.
 - **Resource attributes** (e.g. the file's `status`, stored on each row) are
-*not* in the context, so they stay attached to the pattern and the adapter
-turns them into predicates via `Mapping.Conditions`.
+  *not* in the context, so they stay attached to the pattern. `sqlfilter`
+  requires both a trusted column/expression in `Mapping.Conditions` and the
+  exact operator in `Mapping.AllowedConditionOperators`; missing entries fail
+  closed, and an `IfExists` variant must be allowed separately.
+
+`sqlfilter.Mapping.Service` is required and identifies the table's resource
+service.
 
 Take the file-access policy from [`docs/examples/file-access.json`](./docs/examples/file-access.json):
 it allows `file:listFiles` over the whole tree where `status` is `"active"` or
@@ -127,7 +131,10 @@ it allows `file:listFiles` over the whole tree where `status` is `"active"` or
 clause that narrows the query to exactly what the principal may see:
 
 ```go
-import "github.com/grasp-labs/ds-go-policy/adapter/sqlfilter"
+import (
+	"github.com/grasp-labs/ds-go-policy/adapter/sqlfilter"
+	"github.com/grasp-labs/ds-go-policy/conditionoperator"
+)
 
 // policies for the principal (see docs/examples/file-access.json):
 //   allow file:listFiles on **                 where status in {"active", "archived"}
@@ -135,13 +142,19 @@ import "github.com/grasp-labs/ds-go-policy/adapter/sqlfilter"
 cons := engine.Constrain(policies, "file:listFiles", tenantID, nil)
 
 where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+	Service:    "file",
 	Tenant:     "tenant_id",
 	Type:       "type",
 	Resource:   sqlfilter.ResourceColumn{Path: "path"},
-	Conditions: map[string]string{"status": "status"}, // resource attribute -> column
+	Fixed:      map[sqlfilter.Segment]string{sqlfilter.SegmentRegion: ""},
+	Conditions: map[string]string{"status": "status"},
+	AllowedConditionOperators: map[string][]string{
+		"status": {conditionoperator.StringEquals},
+	},
 })
 if err != nil {
-	// a residual condition or pattern the adapter can't express: fail closed
+	// Do not run the query without an authorization filter.
+	return err
 }
 
 // where:
@@ -155,8 +168,8 @@ db.Where(where, args...).Find(&files)
 
 Some CRN fields are not columns on this table — they are implied by the
 table itself. A `groups` table has no `type` column (every row is a group);
-`scope` and `region` may be unused. Put those constants in `Mapping.Fixed`
-instead of a column.
+`scope` and `region` may be unused. Put those constants in `Mapping.Fixed`,
+using `""` for an absent dimension, instead of a column.
 
 Then a resource pattern is checked against those constants before any SQL
 is built:
@@ -166,7 +179,9 @@ is built:
   that pattern (an allow grants nothing here; a deny denies nothing here)
 
 ```go
-where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+// groupCons contains constraints for the group-list operation.
+where, args, err := sqlfilter.Where(groupCons, sqlfilter.Mapping{
+	Service: "iam",
 	Tenant: "tenant_id",
 	Fixed: map[sqlfilter.Segment]string{
 		sqlfilter.SegmentScope:  "",
@@ -175,17 +190,24 @@ where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
 	},
 	Resource: sqlfilter.ResourceColumn{ID: "id"},
 })
+if err != nil {
+	return err
+}
 // crn:{tenant}::iam::group:{id}  ->  tenant_id = ? AND id = ?
 // crn:{tenant}::iam::role:*      ->  selects nothing here (it's the roles table's grant)
 ```
 
 A platform-published table (managed policies, a global catalog) is different:
 the pattern's tenant is *who may use the grant*, not *who owns the row*. A
-`tenant_id = ?` clause would hide every public row. Set `TenantAnswered` so
-the adapter emits no tenant predicate; the service adds its own visibility:
+`tenant_id = ?` clause would hide every public row. Use `TenantAnswered` only
+after independently establishing that the retained grants apply to this
+published tenant projection; the service must also add its own visibility
+predicate:
 
 ```go
-where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+// publishedCons contains only grants established for this projection.
+where, args, err := sqlfilter.Where(publishedCons, sqlfilter.Mapping{
+	Service:        "iam",
 	TenantAnswered: true,
 	Fixed: map[sqlfilter.Segment]string{
 		sqlfilter.SegmentScope:  "",
@@ -194,6 +216,9 @@ where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
 	},
 	Resource: sqlfilter.ResourceColumn{ID: "id"},
 })
+if err != nil {
+	return err
+}
 // where: 1=1  — the grant covers the table; tenant is not a row filter
 db.Where(where, args...).Where("owner = ?", crn.PlatformTenant).Find(&policies)
 ```
@@ -296,7 +321,11 @@ Matching is whole-segment and linear-time (no backtracking).
 
 A `Policy` carries `Statement`s; each has an `Effect` (`allow`/`deny`), a list of
 `Actions`, a list of resource CRN patterns, and optional `Conditions`. Actions
-support `"service:operation"`, `"service:*"`, and `"*"`.
+support `"service:operation"`, `"service:*"`, and `"*"`; `Compile` rejects any
+other action pattern. Request actions must be concrete: `Decide` implicitly
+denies invalid values, while `Constrain` returns empty constraints. Actions and
+resource patterns are matched independently; any relationship between their
+service names belongs to the calling service's authorization contract.
 
 ### Conditions
 
@@ -335,9 +364,9 @@ a value set without enumerating one resource pattern per value:
 
 At list time (`Constrain`) there is no concrete resource, so `resource.path[N]`
 conditions stay attached to the pattern and the adapter enforces them.
-`pathfilter` folds them into the globs (one pinned glob per allowed value, as
-above); `sqlfilter` maps them to a column via `Mapping.Conditions` and renders
-an `IN` list.
+`pathfilter` folds them into the globs; `sqlfilter` maps them through
+`Mapping.Conditions`, requires `StringEquals` in
+`Mapping.AllowedConditionOperators`, and renders an `IN` list.
 
 ## Examples
 

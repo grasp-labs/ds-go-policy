@@ -10,7 +10,7 @@ import (
 	"github.com/grasp-labs/ds-go-policy/policy"
 )
 
-func TestCompileValidatesServiceOwnedConditionKeys(t *testing.T) {
+func TestCompileValidatesConditionKeys(t *testing.T) {
 	tests := []struct {
 		name    string
 		key     string
@@ -19,7 +19,8 @@ func TestCompileValidatesServiceOwnedConditionKeys(t *testing.T) {
 		{name: "valid service key", key: "inbound:customer:country_code"},
 		{name: "opaque key name", key: "inbound:ResourceTag/customer.country"},
 		{name: "opaque key name containing a colon", key: "config:tag:cost_center"},
-		{name: "legacy unqualified key", key: "department"},
+		{name: "plain key", key: "department"},
+		{name: "empty key", key: "", wantErr: conditionkey.ErrInvalidFormat},
 		{name: "empty service", key: ":customer:country_code", wantErr: conditionkey.ErrInvalidFormat},
 		{name: "empty key name", key: "inbound:", wantErr: conditionkey.ErrInvalidFormat},
 		{name: "invalid service", key: "in bound:customer:country_code", wantErr: conditionkey.ErrInvalidFormat},
