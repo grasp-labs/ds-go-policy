@@ -212,8 +212,7 @@ func validateConditions(conds policy.Conditions) error {
 			// attributes; keys containing a colon must follow <service>:<name>.
 			switch {
 			case key == "":
-				_, err := conditionkey.Parse(key)
-				return fmt.Errorf("invalid condition key %q: %w", key, err)
+				return fmt.Errorf("invalid condition key %q: %w", key, conditionkey.ErrInvalidFormat)
 			case strings.HasPrefix(key, resourceKeyPrefix):
 				if _, ok := pathIndex(key); !ok {
 					return fmt.Errorf("%w: %q", ErrInvalidResourceKey, key)

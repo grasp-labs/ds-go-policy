@@ -76,8 +76,7 @@ func compileStatement(s policy.Statement) (compiledStatement, error) {
 		conditions: s.Conditions,
 	}
 	for _, value := range s.Actions {
-		_, ok := parseActionPattern(value)
-		if !ok {
+		if !ValidActionPattern(value) {
 			return compiledStatement{}, &ParseError{
 				Kind:  ErrInvalidAction,
 				Field: "action",
@@ -119,7 +118,7 @@ func Decide(policies []policy.Policy, r Request) Decision {
 // is allowed only if some statement explicitly allows it and none denies it. A
 // malformed or wildcard request action is implicitly denied.
 func (c Compiled) Decide(r Request) Decision {
-	if _, ok := parseConcreteAction(r.Action); !ok {
+	if !isConcreteAction(r.Action) {
 		return Decision{Allowed: false, Reason: "implicit deny"}
 	}
 
@@ -248,7 +247,7 @@ func Constrain(policies []policy.Policy, action, tenant string, context map[stri
 // if context contains a value with the same key.
 func (c Compiled) Constrain(action, tenant string, context map[string]string) Constraints {
 	var out Constraints
-	if _, ok := parseConcreteAction(action); !ok {
+	if !isConcreteAction(action) {
 		return out
 	}
 	for _, s := range c.statements {

@@ -7,48 +7,36 @@ import (
 
 const actionWildcard = "*"
 
-type parsedAction struct {
-	service   string
-	operation string
-}
-
 // ValidActionPattern reports whether value has supported policy-action syntax:
 // "{service}:{operation}", "{service}:*", or "*". Parts must be non-empty and
 // contain no whitespace; wildcards are valid only in the two wildcard forms.
 func ValidActionPattern(value string) bool {
-	_, ok := parseActionPattern(value)
-	return ok
-}
-
-func parseConcreteAction(value string) (parsedAction, bool) {
-	action, ok := splitAction(value)
-	if !ok || strings.Contains(action.service, actionWildcard) ||
-		strings.Contains(action.operation, actionWildcard) {
-		return parsedAction{}, false
-	}
-	return action, true
-}
-
-func parseActionPattern(value string) (parsedAction, bool) {
 	if value == actionWildcard {
-		return parsedAction{service: actionWildcard, operation: actionWildcard}, true
+		return true
 	}
-
-	pattern, ok := splitAction(value)
-	if !ok || strings.Contains(pattern.service, actionWildcard) ||
-		(pattern.operation != actionWildcard && strings.Contains(pattern.operation, actionWildcard)) {
-		return parsedAction{}, false
-	}
-	return pattern, true
+	service, operation, ok := splitAction(value)
+	return ok && !strings.Contains(service, actionWildcard) &&
+		(operation == actionWildcard || !strings.Contains(operation, actionWildcard))
 }
 
-func splitAction(value string) (parsedAction, bool) {
+// isConcreteAction reports whether value is a concrete "{service}:{operation}"
+// with no wildcard in either part.
+func isConcreteAction(value string) bool {
+	service, operation, ok := splitAction(value)
+	return ok && !strings.Contains(service, actionWildcard) &&
+		!strings.Contains(operation, actionWildcard)
+}
+
+// splitAction splits "{service}:{operation}" on its single colon. It reports
+// ok only when there is exactly one colon, no whitespace, and both parts are
+// non-empty.
+func splitAction(value string) (service, operation string, ok bool) {
 	if strings.Count(value, ":") != 1 || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
-		return parsedAction{}, false
+		return "", "", false
 	}
-	service, operation, _ := strings.Cut(value, ":")
+	service, operation, _ = strings.Cut(value, ":")
 	if service == "" || operation == "" {
-		return parsedAction{}, false
+		return "", "", false
 	}
-	return parsedAction{service: service, operation: operation}, true
+	return service, operation, true
 }
