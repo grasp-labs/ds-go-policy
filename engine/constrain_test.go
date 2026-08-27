@@ -166,6 +166,59 @@ func TestConstrain_NoMatchingAction(t *testing.T) {
 	}
 }
 
+func TestConstrain_PreservesResourceServices(t *testing.T) {
+	pattern := func(service, resource string) string {
+		return fmt.Sprintf("crn:%s:*:%s::file:%s", constrainTenant, service, resource)
+	}
+	resources := []string{
+		pattern("file", "exact/**"),
+		pattern(crn.Wildcard, "wildcard/**"),
+		pattern("state", "foreign/**"),
+	}
+	pol := policy.Policy{Statements: []policy.Statement{
+		{Effect: policy.Allow, Actions: []string{"*"}, Resources: resources},
+		{Effect: policy.Deny, Actions: []string{"*"}, Resources: resources},
+	}}
+
+	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", constrainTenant, nil)
+	wantServices := []string{"file", crn.Wildcard, "state"}
+	wantResources := []string{"exact/**", "wildcard/**", "foreign/**"}
+	for _, result := range []struct {
+		effect  string
+		matches []engine.ResourceMatch
+	}{
+		{effect: "allow", matches: c.Allow},
+		{effect: "deny", matches: c.Deny},
+	} {
+		if len(result.matches) != len(wantServices) {
+			t.Errorf("%s matches = %v, want all action-matched resources", result.effect, result.matches)
+			continue
+		}
+		for i, match := range result.matches {
+			if service := match.Pattern.Service(); service != wantServices[i] {
+				t.Errorf("%s match service = %q, want %q", result.effect, service, wantServices[i])
+			}
+			if resource := match.Pattern.Resource(); resource != wantResources[i] {
+				t.Errorf("%s match resource = %q, want %q", result.effect, resource, wantResources[i])
+			}
+		}
+	}
+}
+
+func TestConstrain_RejectsNonConcreteActions(t *testing.T) {
+	for _, action := range []string{"", "*", "file:*", "file:list*", "file:listFiles:extra"} {
+		constraints := engine.Constrain(
+			[]policy.Policy{constrainPolicy()},
+			action,
+			constrainTenant,
+			nil,
+		)
+		if len(constraints.Allow) != 0 || len(constraints.Deny) != 0 {
+			t.Errorf("Constrain action %q = %#v, want empty constraints", action, constraints)
+		}
+	}
+}
+
 // Constrain applies the same tenant matching as Decide: a platform-issued
 // pattern (placeholder tenant) is resolved to the requesting tenant, and a
 // pattern naming another tenant is dropped.

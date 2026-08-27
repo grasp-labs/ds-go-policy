@@ -31,7 +31,7 @@ A policy is a list of statements. A statement grants (`allow`) or blocks
 | Field         | Value                                                                  |
 | ------------- | ---------------------------------------------------------------------- |
 | `effect`      | `allow` or `deny`.                                                     |
-| `actions`     | `"{service}:{operationId}"`, `"service:*"`, or `"*"`.                  |
+| `actions`     | `"{service}:{operation}"`, `"{service}:*"`, or `"*"`.                |
 | `resources`   | CRN patterns; `*` matches one segment, `**` a whole path tail.         |
 | `conditions`  | optional `operator → key → values`; omit to match unconditionally.    |
 | `sid`         | statement label, returned as the decision reason.                     |
@@ -83,7 +83,7 @@ with one pattern instead of one resource pattern per partition.
    partition segment (`resource.path[2]`) is one of the listed org numbers.
    For listing, `pathfilter` folds the condition into one glob per org
    (`files/inbound/123456789/**`, …); `sqlfilter` renders it as an `IN` clause
-   via `Mapping.Conditions`.
+   using both `Mapping.Conditions` and `Mapping.AllowedConditionOperators`.
 
 ## `inbound-country.json`
 

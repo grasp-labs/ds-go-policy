@@ -26,6 +26,7 @@ func pattern(t *testing.T, resource string) crn.Pattern {
 
 func mapping() sqlfilter.Mapping {
 	return sqlfilter.Mapping{
+		Service:  "file",
 		Tenant:   "tenant_id",
 		Scope:    "owner_id",
 		Region:   "region",
@@ -75,7 +76,12 @@ func TestWhere_DenyConditionMatchesOnlyTrue(t *testing.T) {
 		}},
 	}
 	m := mapping()
-	m.Conditions = map[string]string{"department": "department"}
+	m.Conditions = map[string]string{
+		"department": "department",
+	}
+	m.AllowedConditionOperators = map[string][]string{
+		"department": {conditionoperator.StringEquals},
+	}
 
 	sql, args, err := sqlfilter.Where(c, m)
 	if err != nil {
@@ -96,7 +102,9 @@ func TestWhere_DenyConditionMatchesOnlyTrue(t *testing.T) {
 }
 
 func TestWhere_NoAllowIsClosed(t *testing.T) {
-	sql, args, err := sqlfilter.Where(engine.Constraints{}, mapping())
+	sql, args, err := sqlfilter.Where(engine.Constraints{
+		Deny: []engine.ResourceMatch{{Pattern: pattern(t, "folder/*/file")}},
+	}, mapping())
 	if err != nil {
 		t.Fatalf("Where: %v", err)
 	}
@@ -168,7 +176,15 @@ func TestWhere_ResourceAttributeCondition(t *testing.T) {
 
 	m := mapping()
 	m.Region = "" // file is region-agnostic: no region column
-	m.Conditions = map[string]string{"department": "department"}
+	m.Fixed = map[sqlfilter.Segment]string{
+		sqlfilter.SegmentRegion: "",
+	}
+	m.Conditions = map[string]string{
+		"department": "department",
+	}
+	m.AllowedConditionOperators = map[string][]string{
+		"department": {conditionoperator.StringEquals},
+	}
 	sql, args, err := sqlfilter.Where(c, m)
 	if err != nil {
 		t.Fatalf("Where: %v", err)
@@ -200,10 +216,15 @@ func TestWhere_READMEFileAccessExample(t *testing.T) {
 	cons := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
 
 	sql, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+		Service:    "file",
 		Tenant:     "tenant_id",
 		Type:       "type",
 		Resource:   sqlfilter.ResourceColumn{Path: "path"},
+		Fixed:      map[sqlfilter.Segment]string{sqlfilter.SegmentRegion: ""},
 		Conditions: map[string]string{"status": "status"},
+		AllowedConditionOperators: map[string][]string{
+			"status": {conditionoperator.StringEquals},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Where: %v", err)
@@ -255,7 +276,9 @@ func TestWhere_WholeResourceSingleWildcard(t *testing.T) {
 	// id-addressed (ID column present): no resource predicate. Config is
 	// region-agnostic, so no region column is mapped.
 	sqlID, argsID, err := sqlfilter.Where(c, sqlfilter.Mapping{
-		Tenant: "tenant_id", Type: "type", Resource: sqlfilter.ResourceColumn{ID: "id", Path: "path"},
+		Service: "config", Tenant: "tenant_id", Type: "type",
+		Resource: sqlfilter.ResourceColumn{ID: "id", Path: "path"},
+		Fixed:    map[sqlfilter.Segment]string{sqlfilter.SegmentRegion: ""},
 	})
 	if err != nil {
 		t.Fatalf("Where(id): %v", err)
@@ -269,7 +292,9 @@ func TestWhere_WholeResourceSingleWildcard(t *testing.T) {
 
 	// path-only mapping: restrict to single segment (no separator).
 	sqlPath, argsPath, err := sqlfilter.Where(c, sqlfilter.Mapping{
-		Tenant: "tenant_id", Type: "type", Resource: sqlfilter.ResourceColumn{Path: "path"},
+		Service: "config", Tenant: "tenant_id", Type: "type",
+		Resource: sqlfilter.ResourceColumn{Path: "path"},
+		Fixed:    map[sqlfilter.Segment]string{sqlfilter.SegmentRegion: ""},
 	})
 	if err != nil {
 		t.Fatalf("Where(path): %v", err)
@@ -286,8 +311,20 @@ func TestWhere_WholeResourceSingleWildcard(t *testing.T) {
 // A spread of operators, each mapped to a column, translated to portable SQL.
 func TestWhere_ConditionOperators(t *testing.T) {
 	m := mapping()
+	ifExists := conditionoperator.WithIfExists(conditionoperator.StringEquals)
 	m.Conditions = map[string]string{
-		"department": "dept", "env": "env", "size": "size", "archived": "archived", "owner": "owner",
+		"department": "dept",
+		"env":        "env",
+		"size":       "size",
+		"archived":   "archived",
+		"owner":      "owner",
+	}
+	m.AllowedConditionOperators = map[string][]string{
+		"department": {conditionoperator.StringEquals, conditionoperator.StringNotEquals, ifExists},
+		"env":        {conditionoperator.StringLike},
+		"size":       {conditionoperator.NumericGreaterThan},
+		"archived":   {conditionoperator.Bool},
+		"owner":      {conditionoperator.Null},
 	}
 	base := func(conds policy.Conditions) engine.Constraints {
 		return engine.Constraints{Allow: []engine.ResourceMatch{{Pattern: pattern(t, "**"), Conditions: conds}}}
@@ -313,7 +350,7 @@ func TestWhere_ConditionOperators(t *testing.T) {
 			prefix + "archived = ?", []any{tenant, "file", false}},
 		{"null-true", policy.Conditions{conditionoperator.Null: {"owner": {"true"}}},
 			prefix + "owner IS NULL", []any{tenant, "file"}},
-		{"if-exists", policy.Conditions{conditionoperator.WithIfExists(conditionoperator.StringEquals): {"department": {"eng"}}},
+		{"if-exists", policy.Conditions{ifExists: {"department": {"eng"}}},
 			prefix + "(dept IS NULL OR dept = ?)", []any{tenant, "file", "eng"}},
 	}
 	for _, tc := range cases {
@@ -332,34 +369,102 @@ func TestWhere_ConditionOperators(t *testing.T) {
 	}
 }
 
+func TestWhere_RequiresAllowedConditionOperator(t *testing.T) {
+	constraints := engine.Constraints{Allow: []engine.ResourceMatch{{
+		Pattern: pattern(t, "**"),
+		Conditions: policy.Conditions{
+			conditionoperator.StringEquals: {"department": {"engineering"}},
+		},
+	}}}
+	tests := []struct {
+		name    string
+		allowed []string
+		wantErr bool
+	}{
+		{name: "listed", allowed: []string{conditionoperator.StringEquals}},
+		{name: "unlisted", allowed: []string{conditionoperator.StringLike}, wantErr: true},
+		{name: "missing", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := mapping()
+			m.Conditions = map[string]string{
+				"department": "dept",
+			}
+			m.AllowedConditionOperators = map[string][]string{
+				"department": test.allowed,
+			}
+			_, _, err := sqlfilter.Where(constraints, m)
+			if test.wantErr {
+				if !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
+					t.Fatalf("Where error = %v, want ErrUnsupportedCondition", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Where error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 // Unhappy: a resource-attribute condition with no column mapping is rejected.
 func TestWhere_ConditionUnmappedKey(t *testing.T) {
-	c := engine.Constraints{Allow: []engine.ResourceMatch{{
+	match := engine.ResourceMatch{
 		Pattern:    pattern(t, "**"),
 		Conditions: policy.Conditions{conditionoperator.StringEquals: {"department": {"eng"}}},
-	}}}
-	if _, _, err := sqlfilter.Where(c, mapping()); !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
-		t.Errorf("err = %v, want ErrUnsupportedCondition", err)
+	}
+	for _, effect := range []policy.Effect{policy.Allow, policy.Deny} {
+		t.Run(string(effect), func(t *testing.T) {
+			c := engine.Constraints{Allow: []engine.ResourceMatch{{Pattern: pattern(t, "**")}}}
+			if effect == policy.Allow {
+				c.Allow = []engine.ResourceMatch{match}
+			} else {
+				c.Deny = []engine.ResourceMatch{match}
+			}
+			if _, _, err := sqlfilter.Where(c, mapping()); !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
+				t.Errorf("err = %v, want ErrUnsupportedCondition", err)
+			}
+		})
 	}
 }
 
 // Unhappy: an operator with no portable SQL form is rejected even when mapped.
 func TestWhere_ConditionUnsupportedOperator(t *testing.T) {
 	m := mapping()
-	m.Conditions = map[string]string{"sourceIp": "ip"}
-	c := engine.Constraints{Allow: []engine.ResourceMatch{{
+	m.Conditions = map[string]string{
+		"sourceIp": "ip",
+	}
+	m.AllowedConditionOperators = map[string][]string{
+		"sourceIp": {conditionoperator.IPAddress},
+	}
+	match := engine.ResourceMatch{
 		Pattern:    pattern(t, "**"),
 		Conditions: policy.Conditions{conditionoperator.IPAddress: {"sourceIp": {"10.0.0.0/8"}}},
-	}}}
-	if _, _, err := sqlfilter.Where(c, m); !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
-		t.Errorf("err = %v, want ErrUnsupportedCondition", err)
+	}
+	for _, effect := range []policy.Effect{policy.Allow, policy.Deny} {
+		t.Run(string(effect), func(t *testing.T) {
+			c := engine.Constraints{Allow: []engine.ResourceMatch{{Pattern: pattern(t, "**")}}}
+			if effect == policy.Allow {
+				c.Allow = []engine.ResourceMatch{match}
+			} else {
+				c.Deny = []engine.ResourceMatch{match}
+			}
+			if _, _, err := sqlfilter.Where(c, m); !errors.Is(err, sqlfilter.ErrUnsupportedCondition) {
+				t.Errorf("err = %v, want ErrUnsupportedCondition", err)
+			}
+		})
 	}
 }
 
 func TestWhere_Errors(t *testing.T) {
 	base := engine.Constraints{Allow: []engine.ResourceMatch{{Pattern: pattern(t, "datalake/**")}}}
 
-	if _, _, err := sqlfilter.Where(base, sqlfilter.Mapping{}); !errors.Is(err, sqlfilter.ErrTenantColumnRequired) {
+	if _, _, err := sqlfilter.Where(base, sqlfilter.Mapping{}); !errors.Is(err, sqlfilter.ErrServiceRequired) {
+		t.Errorf("missing service: err = %v", err)
+	}
+	if _, _, err := sqlfilter.Where(base, sqlfilter.Mapping{Service: crn.Wildcard}); !errors.Is(err, sqlfilter.ErrInvalidService) {
+		t.Errorf("wildcard service: err = %v", err)
+	}
+	if _, _, err := sqlfilter.Where(base, sqlfilter.Mapping{Service: "file"}); !errors.Is(err, sqlfilter.ErrTenantColumnRequired) {
 		t.Errorf("missing tenant col: err = %v", err)
 	}
 
@@ -375,13 +480,13 @@ func TestWhere_Errors(t *testing.T) {
 	m := mapping()
 	m.Type = ""
 	if _, _, err := sqlfilter.Where(base, m); !errors.Is(err, sqlfilter.ErrNoColumnForField) {
-		t.Errorf("missing type col: err = %v", err)
+		t.Errorf("unrepresentable type allow: err = %v, want ErrNoColumnForField", err)
 	}
 
 	// mid-path single-segment wildcard cannot be expressed
 	mid := engine.Constraints{Allow: []engine.ResourceMatch{{Pattern: pattern(t, "datalake/*/raw")}}}
 	if _, _, err := sqlfilter.Where(mid, mapping()); !errors.Is(err, sqlfilter.ErrUnsupportedPattern) {
-		t.Errorf("mid-path wildcard: err = %v", err)
+		t.Errorf("unrepresentable resource allow: err = %v, want ErrUnsupportedPattern", err)
 	}
 }
 
@@ -399,10 +504,15 @@ func TestWhere_PathSegmentConditionMappedToColumn(t *testing.T) {
 	c := engine.Constrain([]policy.Policy{pol}, "file:listFiles", tenant, nil)
 
 	sql, args, err := sqlfilter.Where(c, sqlfilter.Mapping{
+		Service:    "file",
 		Tenant:     "tenant_id",
 		Type:       "type",
 		Resource:   sqlfilter.ResourceColumn{Path: "path"},
+		Fixed:      map[sqlfilter.Segment]string{sqlfilter.SegmentRegion: ""},
 		Conditions: map[string]string{"resource.path[2]": "org_number"},
+		AllowedConditionOperators: map[string][]string{
+			"resource.path[2]": {conditionoperator.StringEquals},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Where: %v", err)
@@ -449,7 +559,8 @@ func TestWhere_PlatformPolicyResolvedByConstrain(t *testing.T) {
 // failing with ErrNoColumnForField.
 func TestWhere_FixedSegments(t *testing.T) {
 	groups := sqlfilter.Mapping{
-		Tenant: "tenant_id",
+		Service: "iam",
+		Tenant:  "tenant_id",
 		Fixed: map[sqlfilter.Segment]string{
 			sqlfilter.SegmentScope:  "",
 			sqlfilter.SegmentRegion: "",
@@ -508,23 +619,35 @@ func TestWhere_FixedSegments(t *testing.T) {
 		t.Errorf("args = %#v", args)
 	}
 
-	// A pinned segment that is neither a column nor fixed still fails.
+	// A pinned segment that is neither a column nor fixed fails for either effect.
 	undeclared := groups
-	undeclared.Fixed = map[sqlfilter.Segment]string{sqlfilter.SegmentType: "group"}
+	undeclared.Fixed = map[sqlfilter.Segment]string{
+		sqlfilter.SegmentRegion: "",
+		sqlfilter.SegmentType:   "group",
+	}
 	scoped := parse(fmt.Sprintf("crn:%s:prod:iam::group:*", tenant))
 	if _, _, err := sqlfilter.Where(engine.Constraints{
 		Allow: []engine.ResourceMatch{{Pattern: scoped}},
 	}, undeclared); !errors.Is(err, sqlfilter.ErrNoColumnForField) {
-		t.Errorf("undeclared scope: err = %v, want ErrNoColumnForField", err)
+		t.Errorf("undeclared allow scope: err = %v, want ErrNoColumnForField", err)
+	}
+
+	allGroups := parse(fmt.Sprintf("crn:%s:*:iam::group:*", tenant))
+	if _, _, err := sqlfilter.Where(engine.Constraints{
+		Allow: []engine.ResourceMatch{{Pattern: allGroups}},
+		Deny:  []engine.ResourceMatch{{Pattern: scoped}},
+	}, undeclared); !errors.Is(err, sqlfilter.ErrNoColumnForField) {
+		t.Errorf("undeclared deny scope: err = %v, want ErrNoColumnForField", err)
 	}
 }
 
 // A platform-published collection (managed policies, a global catalog) owns
-// rows under the platform tenant while grants carry the caller's tenant, so
-// the tenant column predicate is declared answered and the service ANDs its
-// own visibility clause instead.
+// rows under the platform tenant. This input is independently known to contain
+// only a platform-placeholder grant, so the tenant predicate can be declared
+// answered while the service applies its own row-visibility clause.
 func TestWhere_TenantAnswered(t *testing.T) {
 	catalog := sqlfilter.Mapping{
+		Service:        "iam",
 		TenantAnswered: true,
 		Fixed: map[sqlfilter.Segment]string{
 			sqlfilter.SegmentScope:  "",

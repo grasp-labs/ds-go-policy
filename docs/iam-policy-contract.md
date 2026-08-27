@@ -43,7 +43,7 @@ const (
 type Statement struct {
     Sid        string     `json:"sid,omitempty"`
     Effect     Effect     `json:"effect"`
-    Actions    []string   `json:"actions"`    // "file:getFile", "file:*", "*"
+    Actions    []string   `json:"actions"`    // Compile: "{service}:{operation}", "{service}:*", "*"
     Resources  []string   `json:"resources"`  // CRN patterns
     Conditions Conditions `json:"conditions,omitempty"`
 }
@@ -124,24 +124,25 @@ import "…/crn"
 
 // Request context for a concrete operation.
 type Request struct {
-    Action   string            // "{service}:{operationId}"
+    Action   string            // concrete "{service}:{operation}"
     Resource crn.CRN
     Context  map[string]string // attributes the service supplies for conditions
 }
 
 type Decision struct {
     Allowed bool
-    Reason  string // matched sid / "implicit deny"
+    Reason  string // matched Sid or a fallback reason
 }
 
 // --- Mode 1: full evaluation (PEP for request gating) ---
-// Deny-wins, default-deny. Used by ds-go-echo-middleware.
+// Deny-wins, default-deny. A malformed or wildcard action is implicitly denied.
+// Used by ds-go-echo-middleware.
 func Decide(policies []policy.Policy, r Request) Decision
 
 // --- Mode 2: partial evaluation (emit a filter for list/query paths) ---
-// No concrete resource: given an action and the requesting tenant, reduce the
-// policy set to the allow/deny resource patterns (+ conditions) that survive
-// for this principal.
+// No concrete resource: given a concrete action and the requesting tenant,
+// reduce the policy set to the allow/deny resource patterns (+ conditions) that
+// survive for this principal.
 type ResourceMatch struct {
     Pattern    crn.Pattern
     Conditions policy.Conditions
@@ -152,10 +153,10 @@ type Constraints struct {
     Deny  []ResourceMatch // must be subtracted by the adapter (deny-wins)
 }
 
-// tenant is the tenant the list/query runs in; patterns naming another tenant
-// are dropped and the platform placeholder resolves to it. context resolves
-// principal/request conditions up front; conditions on resource attributes not
-// present in context stay attached for the adapter.
+// Invalid policies or non-concrete actions return empty constraints.
+// tenant scopes the list/query; foreign-tenant patterns are dropped and the
+// platform placeholder resolves to it. context resolves known conditions up
+// front; unresolved conditions stay attached for the adapter.
 func Constrain(policies []policy.Policy, action, tenant string, context map[string]string) Constraints
 ```
 
@@ -163,23 +164,35 @@ The caller resolves which policies apply to the principal (via the IAM binding /
 
 ## `adapter/*` — the non-shareable last mile
 
-Each adapter turns `Constraints` into one storage's filter. It needs a mapping from CRN fields to that store's columns/paths, so the service provides it:
+Each adapter turns `Constraints` into one storage's filter. It needs a mapping
+from CRN fields to that store's columns/paths, so the service provides it. For
+residual SQL conditions, both the trusted column/expression and the exact
+operator must be configured; an `IfExists` variant is separate, and missing or
+inexpressible entries fail closed:
 
 ```go
 package sqlfilter
 
 // Maps CRN segments to columns for one table.
 type Mapping struct {
-    Tenant, Scope, Region, Type string // column names (Scope -> owner_id/owners)
-    TenantAnswered bool                // tenant enforced outside the filter (platform-published tables)
-    Fixed      map[Segment]string      // segments constant per table (e.g. Type "group" for a groups table)
-    Resource   ResourceColumn          // id column and/or path column
-    Conditions map[string]string       // residual condition key -> column (e.g. "department" -> "dept")
+    Service                    string              // required table service; must not be "*"
+    Tenant, Scope, Region, Type string              // column names (Scope -> owner_id/owners)
+    TenantAnswered             bool                // tenant enforced outside the filter (platform-published tables)
+    Fixed                      map[Segment]string  // per-table constants; use "" for an absent segment
+    Resource                   ResourceColumn      // id column and/or path column
+    Conditions                map[string]string   // residual condition key -> trusted column/expression
+    AllowedConditionOperators map[string][]string // allowed operators for each residual key
 }
 
-// Where returns a clause you AND into the query (GORM-friendly).
+// Where returns a clause you AND into the query. Do not run the query on error.
 func Where(c engine.Constraints, m Mapping) (sql string, args []any, err error)
 ```
+
+`TenantAnswered` is safe only when the caller has independently established
+that every retained match applies to the table's tenant projection. `Constrain`
+alone is insufficient because it makes platform-placeholder and explicit
+caller-tenant patterns indistinguishable. The service must still add its own
+row-visibility predicate.
 
 ```go
 package pathfilter

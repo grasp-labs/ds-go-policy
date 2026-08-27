@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/grasp-labs/ds-go-policy/crn"
@@ -9,19 +10,19 @@ import (
 
 // Request context for a concrete operation.
 type Request struct {
-	Action   string // "{service}:{operationId}"
+	Action   string // concrete "{service}:{operation}"
 	Resource crn.CRN
 	Context  map[string]string // attributes the service supplies for conditions
 }
 
 type Decision struct {
 	Allowed bool
-	Reason  string // matched sid / "implicit deny"
+	Reason  string // matched Sid or a fallback reason
 }
 
-// Compiled is a validated, pre-parsed policy set. Building it once (via Compile)
-// and reusing it avoids re-parsing CRN patterns on every request and moves all
-// failure handling to load time, so evaluation itself never has to fail open.
+// Compiled contains policies validated by Compile with pre-parsed resource
+// patterns. Action slices are cloned; condition data must not be mutated after
+// compilation.
 type Compiled struct {
 	statements []compiledStatement
 }
@@ -34,10 +35,8 @@ type compiledStatement struct {
 	conditions policy.Conditions
 }
 
-// Compile validates each policy and pre-parses its resource patterns. It fails
-// closed: a structural error or an unparseable resource pattern is returned as
-// an error rather than silently skipped — silently skipping a deny pattern
-// would let a typo disable a protection (fail-open).
+// Compile validates policies and action patterns and pre-parses resource
+// patterns. Validation errors are returned rather than silently skipped.
 func Compile(policies []policy.Policy) (Compiled, error) {
 	var c Compiled
 	for _, p := range policies {
@@ -50,37 +49,54 @@ func Compile(policies []policy.Policy) (Compiled, error) {
 			}
 		}
 		for _, s := range p.Statements {
-			if err := validateConditions(s.Conditions); err != nil {
-				return Compiled{}, &ParseError{
-					Kind:  ErrInvalidConditions,
-					Field: "conditions",
-					Value: s.Sid,
-					Cause: err,
-				}
-			}
-
-			cs := compiledStatement{
-				sid:        s.Sid,
-				effect:     s.Effect,
-				actions:    s.Actions,
-				conditions: s.Conditions,
-			}
-			for _, res := range s.Resources {
-				pat, err := crn.ParsePattern(res)
-				if err != nil {
-					return Compiled{}, &ParseError{
-						Kind:  ErrInvalidPattern,
-						Field: "resource",
-						Value: res,
-						Cause: err,
-					}
-				}
-				cs.patterns = append(cs.patterns, pat)
+			cs, err := compileStatement(s)
+			if err != nil {
+				return Compiled{}, err
 			}
 			c.statements = append(c.statements, cs)
 		}
 	}
 	return c, nil
+}
+
+func compileStatement(s policy.Statement) (compiledStatement, error) {
+	if err := validateConditions(s.Conditions); err != nil {
+		return compiledStatement{}, &ParseError{
+			Kind:  ErrInvalidConditions,
+			Field: "conditions",
+			Value: s.Sid,
+			Cause: err,
+		}
+	}
+
+	cs := compiledStatement{
+		sid:        s.Sid,
+		effect:     s.Effect,
+		actions:    slices.Clone(s.Actions),
+		conditions: s.Conditions,
+	}
+	for _, value := range s.Actions {
+		if !ValidActionPattern(value) {
+			return compiledStatement{}, &ParseError{
+				Kind:  ErrInvalidAction,
+				Field: "action",
+				Value: value,
+			}
+		}
+	}
+	for _, value := range s.Resources {
+		pattern, err := crn.ParsePattern(value)
+		if err != nil {
+			return compiledStatement{}, &ParseError{
+				Kind:  ErrInvalidPattern,
+				Field: "resource",
+				Value: value,
+				Cause: err,
+			}
+		}
+		cs.patterns = append(cs.patterns, pattern)
+	}
+	return cs, nil
 }
 
 // --- Mode 1: full evaluation (PEP for request gating) ---
@@ -99,8 +115,13 @@ func Decide(policies []policy.Policy, r Request) Decision {
 
 // Decide evaluates a request against the compiled policies. Deny-wins,
 // default-deny: any applicable deny short-circuits to a denial, and a request
-// is allowed only if some statement explicitly allows it and none denies it.
+// is allowed only if some statement explicitly allows it and none denies it. A
+// malformed or wildcard request action is implicitly denied.
 func (c Compiled) Decide(r Request) Decision {
+	if !isConcreteAction(r.Action) {
+		return Decision{Allowed: false, Reason: "implicit deny"}
+	}
+
 	allow := Decision{}
 	for _, s := range c.statements {
 		if !s.applies(r) {
@@ -168,17 +189,17 @@ type ResourceMatch struct {
 
 type Constraints struct {
 	Allow []ResourceMatch
-	Deny  []ResourceMatch // must be subtracted by the adapter (deny-wins)
+	Deny  []ResourceMatch // must be subtracted by the adapter or caller (deny-wins)
 }
 
-// Filter returns constraints keeping only the resource matches for which
-// keep reports true. keep is a test the caller supplies, run once per match;
-// Allow and Deny are filtered the same way, their order is preserved, and
-// neither input slice is reused. For example, drop matches for a different
-// service before handing constraints to that table's adapter:
+// Filter keeps matches for which keep returns true, applying keep to Allow and
+// Deny. keep must reject only matches that cannot select resources in the target
+// projection. Order is preserved and neither input slice is reused. For
+// example, keep file and wildcard-service patterns:
 //
-//	dbConstraints := cons.Filter(func(m ResourceMatch) bool {
-//		return m.Pattern.Service() == "file"
+//	fileConstraints := constraints.Filter(func(m ResourceMatch) bool {
+//		service := m.Pattern.Service()
+//		return service == "file" || service == crn.Wildcard
 //	})
 func (c Constraints) Filter(keep func(ResourceMatch) bool) Constraints {
 	return Constraints{
@@ -197,9 +218,9 @@ func filterResourceMatches(matches []ResourceMatch, keep func(ResourceMatch) boo
 	return filtered
 }
 
-// Constrain is the pure-function entry point. On a compile error it fails closed
-// (returns empty constraints, i.e. no allow patterns → the adapter grants
-// nothing). Use Compile + Compiled.Constrain to surface errors explicitly.
+// Constrain compiles policies and derives constraints. Invalid policies or
+// non-concrete actions return empty constraints. Use Compile and
+// Compiled.Constrain to surface policy compilation errors.
 func Constrain(policies []policy.Policy, action, tenant string, context map[string]string) Constraints {
 	c, err := Compile(policies)
 	if err != nil {
@@ -209,29 +230,33 @@ func Constrain(policies []policy.Policy, action, tenant string, context map[stri
 }
 
 // Constrain collects the allow/deny resource patterns whose action matches, for
-// the adapter to turn into a storage filter. Only explicit allow/deny effects
-// contribute; any other effect is ignored (fail-closed).
+// the adapter to turn into a storage filter. The action must be concrete;
+// malformed or wildcard actions produce no constraints. Action and resource
+// service names are independent.
 //
-// tenant is the tenant the list/query runs in — the same fact Decide reads from
-// Request.Resource. Patterns are matched against it exactly as Decide would:
-// a pattern naming another tenant is dropped, and the platform placeholder
-// (crn.PlatformTenant) is resolved to this tenant, so adapters only ever see
-// concrete tenants and never interpret policy.
+// tenant must be the trusted, concrete tenant UUID for the list/query. Patterns
+// are matched against it exactly as Decide would: a pattern naming another
+// tenant is dropped, and the platform placeholder (crn.PlatformTenant) is
+// resolved to this tenant, so adapters only ever see concrete tenants and never
+// interpret policy.
 //
 // context supplies the principal/request attributes known at list time.
-// Conditions keyed on those attributes are resolved immediately: a statement
-// whose context-only condition fails is dropped (it does not apply to this
-// principal). Conditions keyed on attributes not in context are resource
-// attributes and stay attached to the pattern for the adapter to enforce.
+// Keys present in context are resolved immediately; a failing condition drops
+// the statement. Keys absent from context stay attached as residual conditions
+// for the adapter. Reserved resource.path[N] keys always remain residual, even
+// if context contains a value with the same key.
 func (c Compiled) Constrain(action, tenant string, context map[string]string) Constraints {
 	var out Constraints
+	if !isConcreteAction(action) {
+		return out
+	}
 	for _, s := range c.statements {
 		if !actionMatches(s.actions, action) {
 			continue
 		}
 		residual, ok := resolveConditions(s.conditions, context)
 		if !ok {
-			continue // a context-only condition failed → statement doesn't apply
+			continue
 		}
 		for _, pat := range s.patterns {
 			switch pat.Tenant() {

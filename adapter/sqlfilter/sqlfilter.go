@@ -8,13 +8,14 @@
 // declared constant via Mapping.Fixed. A pattern pinning a fixed segment is
 // evaluated against the constant instead of translated: it either agrees, and
 // constrains nothing beyond it, or names a value no row of the table can hold,
-// and selects nothing. A pattern that pins a segment the Mapping neither
-// stores nor fixes fails rather than being silently widened.
+// and selects nothing. An otherwise applicable pattern that pins a segment the
+// Mapping neither stores nor fixes fails rather than being silently widened.
 package sqlfilter
 
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,26 +29,29 @@ import (
 const closedClause = "1=0"
 
 var (
-	// ErrTenantColumnRequired is returned when Mapping.Tenant is empty. Tenant
-	// scoping is mandatory — omitting it would allow cross-tenant rows.
+	// ErrServiceRequired is returned when Mapping.Service is empty.
+	ErrServiceRequired = errors.New("sqlfilter: resource service is required")
+	// ErrInvalidService is returned when Mapping.Service equals crn.Wildcard.
+	ErrInvalidService = errors.New("sqlfilter: resource service must be concrete")
+	// ErrTenantColumnRequired is returned when Mapping.Tenant is empty and
+	// TenantAnswered is false. Tenant scoping must be handled in one of those two
+	// places.
 	ErrTenantColumnRequired = errors.New("sqlfilter: tenant column is required")
 	// ErrTenantConflict is returned when Mapping sets both Tenant and
 	// TenantAnswered. The two contradict — one emits the tenant predicate, the
 	// other declares it enforced outside the filter — and guessing which the
 	// service meant could drop a predicate it relies on.
 	ErrTenantConflict = errors.New("sqlfilter: Tenant column and TenantAnswered are mutually exclusive")
-	// ErrNoColumnForField is returned when a pattern constrains a field to a
-	// literal but Mapping neither stores it in a column nor declares it fixed.
+	// ErrNoColumnForField is returned when an applicable pattern constrains a
+	// field to a literal but Mapping neither stores it nor declares it fixed.
 	// Silently dropping the predicate would over-grant, so this fails instead.
 	ErrNoColumnForField = errors.New("sqlfilter: no column mapped for a constrained field")
 	// ErrUnsupportedPattern is returned for resource patterns that cannot be
 	// expressed exactly in SQL (e.g. a mid-path single-segment wildcard).
 	ErrUnsupportedPattern = errors.New("sqlfilter: resource pattern cannot be expressed as SQL")
-	// ErrUnsupportedCondition is returned when a residual condition cannot be
-	// turned into a predicate: its key has no column in Mapping.Conditions, its
-	// operator is not translatable to portable SQL (e.g. IpAddress/Date), or a
-	// value has the wrong type. Failing (rather than dropping the predicate)
-	// keeps the filter from over-granting.
+	// ErrUnsupportedCondition is returned when a residual condition cannot become
+	// a predicate because its key is unmapped, its operator is not allowed or
+	// supported, or a value has the wrong type.
 	ErrUnsupportedCondition = errors.New("sqlfilter: condition cannot be expressed as SQL")
 )
 
@@ -71,47 +75,52 @@ type ResourceColumn struct {
 
 // Mapping maps CRN segments to one table's columns.
 //
-// Tenant is the column holding the owning tenant and is required, unless
-// TenantAnswered declares the segment enforced outside the filter (setting
-// both is contradictory and fails with ErrTenantConflict). Set
-// TenantAnswered only for collections the platform publishes across tenants
-// (managed policies, a global catalog): there the pattern's tenant is the
-// grant's scope, not the row's owner, and an owner-column predicate would hide
-// every public row from a caller plainly allowed to read it. engine.Constrain
-// has already dropped foreign-tenant patterns and resolved the platform
-// placeholder to the caller, so skipping the predicate never widens beyond the
-// caller's grant — but the service must still AND its own visibility clause
-// (e.g. owner = platform) into the query.
+// Service is the concrete resource service represented by the table. Patterns
+// for another service are omitted; wildcard-service patterns remain applicable.
 //
-// Scope, Region and Type are columns for segments that vary per row; leave one
-// empty only if you never constrain that segment to a literal. Fixed instead
-// carries the segments every row of the table shares — for a table of groups,
-// the type "group" and an empty scope and region. A pattern pinning a fixed
-// segment either agrees with the constant (nothing to narrow) or selects no
-// row of this table. A segment that is neither a column nor fixed cannot be
-// evaluated, and a pattern pinning it fails with ErrNoColumnForField rather
-// than being silently ignored. If a segment is both a column and fixed, the
-// column wins.
+// Tenant is the owning-tenant column and is required unless TenantAnswered
+// declares that scoping is enforced outside the filter; setting both fails.
+// TenantAnswered requires independent proof that every retained match applies
+// to the table projection because engine.Constrain alone cannot distinguish a
+// platform placeholder from an explicit caller-tenant pattern. The caller must
+// also enforce the table's own visibility predicate.
 //
-// Conditions maps a residual condition key (a resource attribute left by
-// engine.Constrain, e.g. "department") to the column that stores it. Keys not
-// listed here cannot be expressed and cause ErrUnsupportedCondition — principal
-// or request attributes should instead be resolved via the Constrain context.
+// Scope, Region and Type are columns for segments that vary per row. A column
+// may be empty when applicable patterns use the wildcard or Fixed declares the
+// table-wide value — for example, type "group" and empty scope and region for a
+// groups table. A fixed mismatch selects no rows. A literal with neither a
+// column nor a Fixed entry is unrepresentable; use a Fixed entry with value ""
+// for an unmapped absent dimension. If both are present, the column wins.
+//
+// Conditions maps a residual condition key left by engine.Constrain (e.g.
+// "department") to its trusted SQL column or expression.
+// AllowedConditionOperators lists the exact operator names valid for each key;
+// an IfExists variant must be listed separately from its base operator.
+// Unmapped keys and unlisted operators cause ErrUnsupportedCondition.
 type Mapping struct {
-	Tenant         string
-	TenantAnswered bool
-	Scope          string
-	Region         string
-	Type           string
-	Fixed          map[Segment]string
-	Resource       ResourceColumn
-	Conditions     map[string]string
+	Service                   string
+	Tenant                    string
+	TenantAnswered            bool
+	Scope                     string
+	Region                    string
+	Type                      string
+	Fixed                     map[Segment]string
+	Resource                  ResourceColumn
+	Conditions                map[string]string
+	AllowedConditionOperators map[string][]string
 }
 
 // Where returns a clause (with ? placeholders and positional args) to AND into a
-// query. With no allow patterns — none granted, or none selecting a row of this
-// table — it returns "1=0" (the principal sees nothing).
+// query. A valid Mapping with no applicable allow patterns returns "1=0"
+// without evaluating denies. Otherwise, an applicable pattern or condition
+// that cannot be represented returns an error.
 func Where(c engine.Constraints, m Mapping) (string, []any, error) {
+	if m.Service == "" {
+		return "", nil, ErrServiceRequired
+	}
+	if m.Service == crn.Wildcard {
+		return "", nil, ErrInvalidService
+	}
 	if m.Tenant == "" && !m.TenantAnswered {
 		return "", nil, ErrTenantColumnRequired
 	}
@@ -179,6 +188,31 @@ func group(rm engine.ResourceMatch, m Mapping) (string, []any, bool, error) {
 	p := rm.Pattern
 	var preds []string
 	var args []any
+
+	service := p.Service()
+	if service != crn.Wildcard && service != m.Service {
+		return "", nil, false, nil
+	}
+
+	fields := []struct {
+		segment  Segment
+		col, val string
+	}{
+		{SegmentScope, m.Scope, p.Scope()},
+		{SegmentRegion, m.Region, p.Region()},
+		{SegmentType, m.Type, p.Type()},
+	}
+	// Prove fixed-dimension mismatches before reporting another unmapped field.
+	// One mismatch makes the whole pattern disjoint from this table.
+	for _, f := range fields {
+		if f.val == crn.Wildcard || f.col != "" {
+			continue
+		}
+		if fixed, declared := m.Fixed[f.segment]; declared && f.val != fixed {
+			return "", nil, false, nil
+		}
+	}
+
 	// Tenant is always constrained (never a wildcard); engine.Constrain has
 	// already resolved the platform placeholder to a concrete tenant. With
 	// TenantAnswered the service enforces the segment itself (see Mapping).
@@ -187,14 +221,7 @@ func group(rm engine.ResourceMatch, m Mapping) (string, []any, bool, error) {
 		args = append(args, p.Tenant())
 	}
 
-	for _, f := range []struct {
-		segment  Segment
-		col, val string
-	}{
-		{SegmentScope, m.Scope, p.Scope()},
-		{SegmentRegion, m.Region, p.Region()},
-		{SegmentType, m.Type, p.Type()},
-	} {
+	for _, f := range fields {
 		if f.val == crn.Wildcard {
 			continue // "*" matches any value (Decide: matchField("*", …) is always true)
 		}
@@ -212,13 +239,9 @@ func group(rm engine.ResourceMatch, m Mapping) (string, []any, bool, error) {
 			}
 			continue // agrees with the table's constant; nothing to narrow
 		}
-		// An empty segment is region-agnostic. With no column there is nothing
-		// to filter (all rows share the absent dimension), so it is
-		// unconstrained. A non-empty literal with neither column nor constant
-		// would be dropped silently and over-grant, so that fails instead.
-		if f.val == "" {
-			continue
-		}
+		// Without a column or an explicit fixed value, no literal can be
+		// evaluated safely. This includes "": an absent dimension must be
+		// declared with Fixed rather than inferred from the pattern.
 		return "", nil, false, ErrNoColumnForField
 	}
 
@@ -301,8 +324,8 @@ func escapeLike(s string) string {
 
 // conditionPreds translates the residual conditions on a match into predicates.
 // Output is deterministic (operators and keys sorted) so the generated SQL is
-// stable. A key with no mapped column, or an operator/value that cannot be
-// expressed, fails with ErrUnsupportedCondition (fail-safe).
+// stable. An unmapped key or a disallowed/inexpressible operator or value fails
+// with ErrUnsupportedCondition (fail-safe).
 func conditionPreds(conds policy.Conditions, m Mapping) ([]string, []any, error) {
 	var preds []string
 	var args []any
@@ -312,6 +335,14 @@ func conditionPreds(conds policy.Conditions, m Mapping) ([]string, []any, error)
 			col := m.Conditions[key]
 			if col == "" {
 				return nil, nil, fmt.Errorf("%w: no column mapped for key %q", ErrUnsupportedCondition, key)
+			}
+			if !slices.Contains(m.AllowedConditionOperators[key], op) {
+				return nil, nil, fmt.Errorf(
+					"%w: operator %q is not allowed for key %q",
+					ErrUnsupportedCondition,
+					op,
+					key,
+				)
 			}
 			pred, a, err := condPred(op, col, byKey[key])
 			if err != nil {
