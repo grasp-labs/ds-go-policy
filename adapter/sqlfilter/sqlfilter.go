@@ -108,6 +108,14 @@ type ResourceColumn struct {
 // projection, and the caller must still enforce the table's own visibility
 // predicate.
 //
+// PublicRows declares the table's platform-published rows readable by every
+// principal that holds the action, so the filter ORs issuer = 'public' onto the
+// allow clause instead of requiring a pattern to name them. It widens only what
+// an existing grant already opened: with no applicable allow the clause stays
+// closed, and denies still subtract. Set it on the mapping a read uses; a
+// mapping used for writes must leave it off, or a tenant could edit rows the
+// platform published. The trust invariant below applies.
+//
 // Scope, Region and Type are columns for segments that vary per row. A column
 // may be empty when applicable patterns use the wildcard or Fixed declares the
 // table-wide value — for example, type "group" and empty scope and region for a
@@ -124,6 +132,7 @@ type Mapping struct {
 	Service                   string
 	Tenant                    string
 	TenantAnswered            bool
+	PublicRows                bool
 	Scope                     string
 	Region                    string
 	Type                      string
@@ -156,6 +165,13 @@ func Where(c engine.Constraints, m Mapping) (string, []any, error) {
 	}
 	if allowSQL == "" {
 		return closedClause, nil, nil
+	}
+	// A grant over any row of a PublicRows table also opens its platform-published
+	// rows. The OR sits inside the allow clause, so a pattern that narrows the
+	// caller's own rows by id, owner or condition cannot narrow these away, and
+	// the deny composition below still subtracts them.
+	if m.PublicRows {
+		allowSQL = "(" + allowSQL + ") OR " + platformOwnedPredicate
 	}
 	denySQL, denyArgs, err := orGroups(c.Deny, m)
 	if err != nil {

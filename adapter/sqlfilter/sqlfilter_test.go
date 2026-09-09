@@ -664,6 +664,105 @@ func TestWhere_PublicRowsBypassOwnFilters(t *testing.T) {
 	}
 }
 
+// datasets is a PublicRows table: its platform-published rows are readable by
+// every principal holding the action, so no policy has to name them.
+func datasets() sqlfilter.Mapping {
+	return sqlfilter.Mapping{
+		Service:    "config",
+		Tenant:     "tenant_id",
+		PublicRows: true,
+		Scope:      "owner_id",
+		Fixed: map[sqlfilter.Segment]string{
+			sqlfilter.SegmentRegion: "",
+			sqlfilter.SegmentType:   "dataset",
+		},
+		Resource: sqlfilter.ResourceColumn{ID: "id"},
+	}
+}
+
+// PublicRows widens a grant that pins one of the caller's own rows: the id
+// predicate stays in the caller's group and the platform's rows arrive through
+// the OR, which is what a policy naming a single dataset would otherwise
+// exclude.
+func TestWhere_PublicRowsWidenAnIdPinnedGrant(t *testing.T) {
+	const ownID = "11111111-1111-1111-1111-111111111111"
+	pol := policy.Policy{
+		ID: "dataset-owner-grant",
+		Statements: []policy.Statement{
+			{Sid: "own-single-dataset", Effect: policy.Allow,
+				Actions:   []string{"config:listDataset", "config:getDataset"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:%s", tenant, ownID)}},
+		},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "config:listDataset", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, datasets())
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	wantSQL := "(tenant_id = ? AND id = ?) OR issuer = 'public'"
+	if sql != wantSQL {
+		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
+	}
+	if !reflect.DeepEqual(args, []any{tenant, ownID}) {
+		t.Errorf("args = %#v, want [tenant ownID]", args)
+	}
+}
+
+// PublicRows widens an existing grant; it does not create one. Without an
+// applicable allow for the action the clause stays closed, so a principal with
+// no grant on the table sees no platform rows either.
+func TestWhere_PublicRowsStayClosedWithoutAGrant(t *testing.T) {
+	pol := policy.Policy{
+		ID: "other-action",
+		Statements: []policy.Statement{
+			{Sid: "create-only", Effect: policy.Allow, Actions: []string{"config:createDataset"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:*", tenant)}},
+		},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "config:listDataset", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, datasets())
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	if !sqlfilter.IsClosed(sql) {
+		t.Errorf("sql = %q, want the closed clause", sql)
+	}
+	if args != nil {
+		t.Errorf("args = %#v, want none", args)
+	}
+}
+
+// The platform can withdraw one of its published rows from a tenant: an "aic"
+// deny emits the same marker predicate and is subtracted from the widened allow.
+func TestWhere_PublicRowsSubtractedByPlatformDeny(t *testing.T) {
+	const secretID = "22222222-2222-2222-2222-222222222222"
+	pol := policy.Policy{
+		ID: "tenant-wide",
+		Statements: []policy.Statement{
+			{Sid: "all-own", Effect: policy.Allow, Actions: []string{"config:listDataset"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:*", tenant)}},
+			{Sid: "not-that-public-one", Effect: policy.Deny, Actions: []string{"config:listDataset"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:%s", crn.PlatformTenant, secretID)}},
+		},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "config:listDataset", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, datasets())
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	wantSQL := "((tenant_id = ?) OR issuer = 'public') " +
+		"AND ((issuer = 'public' AND id = ?) IS NOT TRUE)"
+	if sql != wantSQL {
+		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
+	}
+	if !reflect.DeepEqual(args, []any{tenant, secretID}) {
+		t.Errorf("args = %#v, want [tenant secretID]", args)
+	}
+}
+
 // A per-type table (here: IAM groups) has no type column — the type is the
 // table — and no scope or region dimension. Fixed declares those constants so
 // the narrow pattern "crn:{tenant}::iam::group:{id}" evaluates instead of

@@ -194,6 +194,7 @@ type Mapping struct {
     Service                    string              // required table service; must not be "*"
     Tenant, Scope, Region, Type string              // column names (Scope -> owner_id/owners)
     TenantAnswered             bool                // tenant enforced outside the filter (escape hatch)
+    PublicRows                 bool                // reads: OR issuer = 'public' onto the allow clause
     Fixed                      map[Segment]string  // per-table constants; use "" for an absent segment
     Resource                   ResourceColumn      // id column and/or path column
     Conditions                map[string]string   // residual condition key -> trusted column/expression
@@ -210,6 +211,13 @@ no per-table configuration is needed. This composes natively with a caller's own
 `self` grant: `orGroups` ORs the two, yielding the caller's rows plus the
 platform's public rows. The caller's own id/condition filters stay inside the
 `self` group and never narrow public rows.
+
+`PublicRows` makes that visibility unconditional for tables whose published rows
+are part of the product: any principal already holding the action reads them, no
+statement required. The marker is OR-ed onto the allow clause, so it widens an
+existing grant and never creates one — an empty allow still yields `1=0` — and an
+`aic` deny still subtracts. Reads only: a write mapping that sets it would let a
+tenant edit platform-published rows.
 
 > **Trust invariant — `issuer = 'public'` is trusted.** The filter authorizes a
 > row to every principal *because the row asserts `issuer = 'public'`*. It does

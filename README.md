@@ -241,6 +241,35 @@ caller's filters (this matters on list endpoints). Denies work the same way: a
 platform-issued deny also carries `issuer = 'public'` and subtracts the matching
 platform rows.
 
+Where the platform's rows are part of the product rather than something a tenant
+subscribes to, requiring every policy to carry the `aic` statement is a footgun:
+a tenant whose only grant pins one of its own datasets would silently lose them,
+because that pattern narrows to a single id. `PublicRows` declares the table's
+published rows readable by every principal that already holds the action, and the
+adapter ORs the marker onto the allow clause:
+
+```go
+// cons: allow config:listDataset on crn:{tenant}:*:config::dataset:{ownID} only
+where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+	Service:    "config",
+	Tenant:     "dataset.tenant_id",
+	PublicRows: true,
+	Fixed: map[sqlfilter.Segment]string{
+		sqlfilter.SegmentScope:  "",
+		sqlfilter.SegmentRegion: "",
+		sqlfilter.SegmentType:   "dataset",
+	},
+	Resource: sqlfilter.ResourceColumn{ID: "dataset.id"},
+})
+// where: (dataset.tenant_id = ? AND dataset.id = ?) OR issuer = 'public'
+// args:  [tenantID, ownID]
+```
+
+It widens an existing grant, never creates one: with no applicable allow for the
+action the clause is still `1=0`, and an `aic` deny still subtracts published
+rows. Set it only on the mapping a read uses — a write mapping that sets it lets
+a tenant edit what the platform published.
+
 `TenantAnswered` remains the escape hatch for a projection whose tenant scoping
 is enforced outside the filter — it emits no tenant predicate at all. Use it only
 after independently establishing that the retained grants apply to this
