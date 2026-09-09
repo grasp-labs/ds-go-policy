@@ -219,9 +219,10 @@ func TestConstrain_RejectsNonConcreteActions(t *testing.T) {
 	}
 }
 
-// Constrain applies the same tenant matching as Decide: a platform-issued
-// pattern (placeholder tenant) is resolved to the requesting tenant, and a
-// pattern naming another tenant is dropped.
+// Constrain applies the same tenant handling as Decide: a "self" pattern is
+// rewritten to the requesting tenant, an "aic" (platform) pattern is kept
+// unrewritten for the adapter to bind, and a pattern naming another tenant is
+// dropped.
 func TestConstrain_TenantMatching(t *testing.T) {
 	otherTenant := "11111111-1111-1111-1111-111111111111"
 	platform := policy.Policy{
@@ -229,6 +230,13 @@ func TestConstrain_TenantMatching(t *testing.T) {
 		Statements: []policy.Statement{{
 			Sid: "aic-deny-secrets", Effect: policy.Deny, Actions: []string{"*"},
 			Resources: []string{fmt.Sprintf("crn:%s:*:file::file:**/secrets/**", crn.PlatformTenant)},
+		}},
+	}
+	selfPol := policy.Policy{
+		ID: "self",
+		Statements: []policy.Statement{{
+			Sid: "self-allow", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+			Resources: []string{fmt.Sprintf("crn:%s:*:file::file:mine/**", crn.CallerTenant)},
 		}},
 	}
 	otherPol := policy.Policy{
@@ -239,17 +247,36 @@ func TestConstrain_TenantMatching(t *testing.T) {
 		}},
 	}
 
-	c := engine.Constrain([]policy.Policy{constrainPolicy(), platform, otherPol},
+	c := engine.Constrain([]policy.Policy{constrainPolicy(), platform, selfPol, otherPol},
 		"file:listFiles", constrainTenant, nil)
 
-	// The placeholder is resolved: the emitted deny names the requesting tenant.
-	if !contains(denyPaths(c), "**/secrets/**") {
+	// The "aic" deny is kept unrewritten so the adapter can bind it to the
+	// table's platform-owned id.
+	var sawAic bool
+	for _, rm := range c.Deny {
+		if rm.Pattern.Resource() == "**/secrets/**" {
+			sawAic = true
+			if rm.Pattern.Tenant() != crn.PlatformTenant {
+				t.Errorf("aic deny rewritten to %q; want kept as %q", rm.Pattern.Tenant(), crn.PlatformTenant)
+			}
+		}
+	}
+	if !sawAic {
 		t.Fatalf("platform deny missing; got %v", denyPaths(c))
 	}
-	for _, rm := range c.Deny {
-		if rm.Pattern.Tenant() == crn.PlatformTenant {
-			t.Errorf("placeholder leaked to constraints: %v", rm.Pattern)
+
+	// The "self" allow is rewritten to the requesting tenant.
+	var sawSelf bool
+	for _, rm := range c.Allow {
+		if rm.Pattern.Resource() == "mine/**" {
+			sawSelf = true
+			if rm.Pattern.Tenant() != constrainTenant {
+				t.Errorf("self allow tenant = %q, want %q (rewritten)", rm.Pattern.Tenant(), constrainTenant)
+			}
 		}
+	}
+	if !sawSelf {
+		t.Fatalf("self allow missing; got %v", allowPaths(c))
 	}
 
 	// The other tenant's allow cannot match this request and is dropped.

@@ -28,6 +28,23 @@ import (
 
 const closedClause = "1=0"
 
+// PlatformIssuerColumn and PlatformIssuerPublic are the fixed column and value
+// that mark platform-published rows in every platform-published table. They are
+// the single source of truth for the trust invariant behind the "aic" pattern:
+// the read filter authorizes such a row to every principal solely because it
+// carries this marker, so each service's write path MUST reject any attempt by a
+// non-platform tenant to set PlatformIssuerColumn to PlatformIssuerPublic.
+// Services should reference these constants in that guard (and its tests) so the
+// write check cannot drift from the read filter. See docs/iam-policy-contract.md.
+const (
+	PlatformIssuerColumn = "issuer"
+	PlatformIssuerPublic = "public"
+)
+
+// platformOwnedPredicate is the SQL predicate emitted for an "aic" pattern,
+// derived from the exported marker so the two cannot diverge.
+const platformOwnedPredicate = PlatformIssuerColumn + " = '" + PlatformIssuerPublic + "'"
+
 var (
 	// ErrServiceRequired is returned when Mapping.Service is empty.
 	ErrServiceRequired = errors.New("sqlfilter: resource service is required")
@@ -79,11 +96,17 @@ type ResourceColumn struct {
 // for another service are omitted; wildcard-service patterns remain applicable.
 //
 // Tenant is the owning-tenant column and is required unless TenantAnswered
-// declares that scoping is enforced outside the filter; setting both fails.
-// TenantAnswered requires independent proof that every retained match applies
-// to the table projection because engine.Constrain alone cannot distinguish a
-// platform placeholder from an explicit caller-tenant pattern. The caller must
-// also enforce the table's own visibility predicate.
+// declares that scoping is enforced outside the filter; setting both fails. A
+// concrete or "self" pattern emits Tenant = ?; a pattern bound to
+// crn.PlatformTenant ("aic") names platform-published rows, which every table
+// marks with the fixed convention issuer = 'public' — the adapter emits that
+// predicate directly, so no per-table configuration is required.
+//
+// TenantAnswered declares the tenant predicate is enforced outside the filter,
+// so no tenant predicate is emitted for either a concrete or a platform pattern.
+// It requires independent proof that every retained match applies to the table
+// projection, and the caller must still enforce the table's own visibility
+// predicate.
 //
 // Scope, Region and Type are columns for segments that vary per row. A column
 // may be empty when applicable patterns use the wildcard or Fixed declares the
@@ -214,11 +237,17 @@ func group(rm engine.ResourceMatch, m Mapping) (string, []any, bool, error) {
 	}
 
 	// Tenant is always constrained (never a wildcard); engine.Constrain has
-	// already resolved the platform placeholder to a concrete tenant. With
-	// TenantAnswered the service enforces the segment itself (see Mapping).
+	// already resolved a "self" placeholder to the concrete request tenant. A
+	// PlatformTenant ("aic") pattern names platform-published rows, marked by the
+	// fixed issuer = 'public' convention. With TenantAnswered the service enforces
+	// tenant scoping itself (see Mapping).
 	if !m.TenantAnswered {
-		preds = append(preds, m.Tenant+" = ?")
-		args = append(args, p.Tenant())
+		if p.Tenant() == crn.PlatformTenant {
+			preds = append(preds, platformOwnedPredicate)
+		} else {
+			preds = append(preds, m.Tenant+" = ?")
+			args = append(args, p.Tenant())
+		}
 	}
 
 	for _, f := range fields {

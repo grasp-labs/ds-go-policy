@@ -10,7 +10,7 @@
         "*"
       ],
       "resources": [
-        "crn:aic:*:file::file:**/secrets/**"
+        "crn:self:*:file::file:**/secrets/**"
       ]
     }
   ]

@@ -1,0 +1,18 @@
+{
+  "id": "platform-public-datasets",
+  "name": "Platform public datasets",
+  "version": "1.0.0",
+  "statements": [
+    {
+      "sid": "public-datasets",
+      "effect": "allow",
+      "actions": [
+        "config:listDataset",
+        "config:getDataset"
+      ],
+      "resources": [
+        "crn:aic:*:config::dataset:*"
+      ]
+    }
+  ]
+}

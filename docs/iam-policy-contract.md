@@ -100,19 +100,33 @@ func (c CRN) String() string
 type Pattern struct{ /* parsed form */ }
 
 func ParsePattern(s string) (Pattern, error)
-func (p Pattern) Matches(c CRN) bool
+func (p Pattern) Matches(c CRN, requestTenant string) bool
 ```
 
-### The platform tenant — `aic`
+### Reserved tenant tokens — `aic` and `self`
 
-`crn.PlatformTenant` (`"aic"`) is a reserved token in the tenant position. It
-marks **platform-issued policies usable by all tenants**: in a concrete CRN it names a platform-owned resource;
-in a pattern it is a placeholder for the requesting tenant and matches
-resources of any tenant. The engine evaluates whatever policy set the caller
-binds to a principal — restricting who may author `aic` patterns is the policy
-management plane's responsibility. For list/query paths `engine.Constrain`
-resolves the placeholder to the requesting tenant before emitting constraints,
-so adapters only ever see concrete tenants.
+The tenant position carries two reserved tokens.
+
+`crn.PlatformTenant` (`"aic"`) names **platform-owned resources** in both
+positions: a concrete `crn:aic:...` is a platform-owned resource, and an `aic`
+pattern matches only platform-owned rows (never another tenant's). It is never
+rewritten.
+
+`crn.CallerTenant` (`"self"`) stands for **the requesting tenant** and is valid
+in a pattern only — a concrete CRN is a real identity, so `crn.Parse` rejects
+`self`. A `self` pattern matches resources whose tenant equals the caller's.
+
+| pattern tenant | `Decide` matches                           | `Constrain` keeps                       |
+| -------------- | ------------------------------------------ | --------------------------------------- |
+| concrete UUID  | resources of that tenant                   | only when it equals the request tenant  |
+| `aic`          | platform-owned resources only              | as-is, unrewritten, for the adapter     |
+| `self`         | resources whose tenant equals the caller's | rewritten to the request tenant         |
+
+The engine evaluates whatever policy set the caller binds to a principal —
+restricting who may author `aic`/`self` patterns is the policy management
+plane's responsibility. `Decide` matches `self` against `Request.Tenant`; for
+list/query paths `engine.Constrain` rewrites `self` to the requesting tenant and
+keeps `aic` for the adapter to bind to a platform-owned id.
 
 ## `engine/` — the security-critical core (two modes)
 
@@ -126,6 +140,7 @@ import "…/crn"
 type Request struct {
     Action   string            // concrete "{service}:{operation}"
     Resource crn.CRN
+    Tenant   string            // caller's tenant; matched by "self" patterns
     Context  map[string]string // attributes the service supplies for conditions
 }
 
@@ -154,9 +169,10 @@ type Constraints struct {
 }
 
 // Invalid policies or non-concrete actions return empty constraints.
-// tenant scopes the list/query; foreign-tenant patterns are dropped and the
-// platform placeholder resolves to it. context resolves known conditions up
-// front; unresolved conditions stay attached for the adapter.
+// tenant scopes the list/query; foreign-tenant patterns are dropped, a "self"
+// pattern is rewritten to it, and an "aic" pattern is kept unrewritten for the
+// adapter. context resolves known conditions up front; unresolved conditions
+// stay attached for the adapter.
 func Constrain(policies []policy.Policy, action, tenant string, context map[string]string) Constraints
 ```
 
@@ -177,7 +193,7 @@ package sqlfilter
 type Mapping struct {
     Service                    string              // required table service; must not be "*"
     Tenant, Scope, Region, Type string              // column names (Scope -> owner_id/owners)
-    TenantAnswered             bool                // tenant enforced outside the filter (platform-published tables)
+    TenantAnswered             bool                // tenant enforced outside the filter (escape hatch)
     Fixed                      map[Segment]string  // per-table constants; use "" for an absent segment
     Resource                   ResourceColumn      // id column and/or path column
     Conditions                map[string]string   // residual condition key -> trusted column/expression
@@ -188,11 +204,45 @@ type Mapping struct {
 func Where(c engine.Constraints, m Mapping) (sql string, args []any, err error)
 ```
 
-`TenantAnswered` is safe only when the caller has independently established
-that every retained match applies to the table's tenant projection. `Constrain`
-alone is insufficient because it makes platform-placeholder and explicit
-caller-tenant patterns indistinguishable. The service must still add its own
-row-visibility predicate.
+An `aic` (platform-published) pattern emits the fixed `issuer = 'public'`
+predicate — every platform-published table marks its rows by that convention, so
+no per-table configuration is needed. This composes natively with a caller's own
+`self` grant: `orGroups` ORs the two, yielding the caller's rows plus the
+platform's public rows. The caller's own id/condition filters stay inside the
+`self` group and never narrow public rows.
+
+> **Trust invariant — `issuer = 'public'` is trusted.** The filter authorizes a
+> row to every principal *because the row asserts `issuer = 'public'`*. It does
+> not verify ownership. The soundness of cross-tenant isolation therefore rests
+> entirely on the write path, and every API that writes a platform-published
+> table **MUST GUARANTEE**:
+>
+> 1. Only the platform tenant can set `issuer = 'public'`. A request from any
+>    other tenant that attempts to set it MUST be rejected. The write guard
+>    should compare against `sqlfilter.PlatformIssuerColumn` /
+>    `sqlfilter.PlatformIssuerPublic` (the same constants the read filter trusts)
+>    so the two cannot drift.
+> 2. When `issuer = 'public'` is set, the row is platform-owned — its `tenant_id`
+>    (owner) is the platform tenant id.
+>
+> If any write path violates (1), a tenant can publish its own row to every other
+> tenant — a cross-tenant read leak the policy engine cannot detect, because by
+> the time the filter runs the row already claims to be public. This guarantee is
+> a hard, tested requirement of each service, not a convention. It is the price
+> of expressing public visibility as a row attribute instead of ownership;
+> binding to `tenant_id = <platform id>` would move the trust to system-assigned
+> ownership, but requires the platform id to be configured per table.
+
+Two further constraints follow from the fixed predicate: every table that can
+receive an `aic` grant must have an `issuer` column (a missing column is a
+runtime error, fail-closed), and the marker column/value (`issuer` / `'public'`)
+is unqualified, so callers that alias or JOIN the table must keep `issuer`
+unambiguous.
+
+`TenantAnswered` is the escape hatch for a projection whose tenant scoping is
+enforced outside the filter: it emits no tenant predicate and is safe only when
+the caller has independently established that every retained match applies to the
+table's projection. The service must still add its own row-visibility predicate.
 
 ```go
 package pathfilter

@@ -67,12 +67,19 @@ the resource kind (`plan`, `invoice`, …) as `type` and the id as `resource`.
 
 ## `platform-guardrail.json`
 
-A **platform-issued** policy: its patterns use the reserved platform token
-`aic` (`crn.PlatformTenant`) as a placeholder for the requesting tenant, so the
-one document applies to every tenant it is bound to.
+A **platform-issued** policy bound to every principal. Its pattern uses the
+reserved token `self` (`crn.CallerTenant`), which stands for the requesting
+tenant, so the one document guards each tenant's own resources without reaching
+across tenants.
 
-1. **`aic-protect-secrets`** — deny every action on any `**/secrets/**` path,
-   in any tenant (a guardrail that overrides tenant allows, deny-wins).
+1. **`aic-protect-secrets`** — deny every action on any `**/secrets/**` path in
+   the caller's own tenant (a guardrail that overrides tenant allows, deny-wins).
+
+> The two reserved tenant tokens are distinct: `self` is the requesting tenant
+> (valid in a pattern only), while `aic` (`crn.PlatformTenant`) names
+> platform-owned resources — an `aic` pattern matches only platform-owned rows,
+> never another tenant's. See the "platform tenant" section of the top-level
+> [`README`](../../README.md) for the full table.
 
 ## `inbound-partitions.json`
 
@@ -102,3 +109,30 @@ allowlist and the mapping to storage.
 2. **`plan-write-staging-only`** — create/update/delete `plan`, only when
    `environment` is `staging`.
 3. **`no-invoice-generation`** — deny `config:generateInvoice`.
+
+## `dataset-owner-grant.json` + `platform-public-datasets.json`
+
+The core v1.4.0 scenario for a platform-published table (`dataset`), modeled as
+**two separate documents** — public visibility is not copied into every user's
+policy.
+
+- **`dataset-owner-grant.json`** — the caller's *own* policy.
+  1. **`own-single-dataset`** — list/get one specific dataset owned by the
+     caller's tenant (a concrete tenant UUID + concrete id).
+- **`platform-public-datasets.json`** — a single **platform-issued** policy the
+  IAM binding layer attaches to *every* principal (like `platform-guardrail.json`).
+  1. **`public-datasets`** — list/get every **public** dataset, addressed by the
+     platform token `aic` (`crn.PlatformTenant`); rows an issuer published for all.
+
+The engine composes whatever policy set the caller resolves for a principal, so
+these two documents combine at evaluation time. At list time `sqlfilter.Where`
+yields the union — the caller's own row OR all public rows (marked by the fixed
+`issuer = 'public'` convention) — and nothing from another tenant:
+
+```sql
+(tenant_id = ? AND id = ?)   -- the caller's granted dataset
+  OR (issuer = 'public')      -- every public/platform-owned dataset
+```
+
+The caller's own `id`/`status`/etc. filters stay inside the first group, so they
+never narrow the public rows (important for list endpoints).

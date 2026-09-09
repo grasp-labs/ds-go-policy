@@ -12,7 +12,12 @@ import (
 type Request struct {
 	Action   string // concrete "{service}:{operation}"
 	Resource crn.CRN
-	Context  map[string]string // attributes the service supplies for conditions
+	// Tenant is the requesting (caller's) tenant. It is matched by CallerTenant
+	// ("self") patterns and is distinct from Resource.Tenant, which is the tenant
+	// that owns the resource being acted on. Leave it empty only when no policy
+	// uses "self"; a "self" pattern against a mismatched Tenant denies.
+	Tenant  string
+	Context map[string]string // attributes the service supplies for conditions
 }
 
 type Decision struct {
@@ -144,13 +149,13 @@ func (c Compiled) Decide(r Request) Decision {
 
 func (s compiledStatement) applies(r Request) bool {
 	return actionMatches(s.actions, r.Action) &&
-		s.matchesResource(r.Resource) &&
+		s.matchesResource(r.Resource, r.Tenant) &&
 		evalConditions(s.conditions, r.Context, strings.Split(r.Resource.Resource, "/"))
 }
 
-func (s compiledStatement) matchesResource(c crn.CRN) bool {
+func (s compiledStatement) matchesResource(c crn.CRN, requestTenant string) bool {
 	for _, pat := range s.patterns {
-		if pat.Matches(c) {
+		if pat.Matches(c, requestTenant) {
 			return true
 		}
 	}
@@ -235,10 +240,11 @@ func Constrain(policies []policy.Policy, action, tenant string, context map[stri
 // service names are independent.
 //
 // tenant must be the trusted, concrete tenant UUID for the list/query. Patterns
-// are matched against it exactly as Decide would: a pattern naming another
-// tenant is dropped, and the platform placeholder (crn.PlatformTenant) is
-// resolved to this tenant, so adapters only ever see concrete tenants and never
-// interpret policy.
+// are matched against it exactly as Decide would: a concrete pattern naming
+// another tenant is dropped, a CallerTenant ("self") pattern is rewritten to
+// this tenant, and a PlatformTenant ("aic") pattern is kept unrewritten so the
+// adapter can bind it to the table's platform-owned id. The adapter never
+// interprets policy.
 //
 // context supplies the principal/request attributes known at list time.
 // Keys present in context are resolved immediately; a failing condition drops
@@ -260,9 +266,10 @@ func (c Compiled) Constrain(action, tenant string, context map[string]string) Co
 		}
 		for _, pat := range s.patterns {
 			switch pat.Tenant() {
-			case tenant: // the pattern's own tenant
-			case crn.PlatformTenant: // placeholder → the requesting tenant
+			case tenant: // concrete UUID equal to the request tenant → keep
+			case crn.CallerTenant: // "self" → rewrite to the request tenant
 				pat = pat.WithTenant(tenant)
+			case crn.PlatformTenant: // "aic" → platform-owned; keep unrewritten for the adapter
 			default:
 				continue // another tenant: can never match this request
 			}

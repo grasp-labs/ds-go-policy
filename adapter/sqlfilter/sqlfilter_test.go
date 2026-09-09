@@ -527,10 +527,10 @@ func TestWhere_PathSegmentConditionMappedToColumn(t *testing.T) {
 	}
 }
 
-// End-to-end with a platform-issued policy: engine.Constrain resolves the
-// tenant placeholder to the requesting tenant, so the adapter emits a plain
-// tenant predicate and never sees the placeholder.
-func TestWhere_PlatformPolicyResolvedByConstrain(t *testing.T) {
+// A platform-issued ("aic") grant is kept unrewritten by engine.Constrain; the
+// adapter emits the fixed issuer = 'public' predicate for it — no tenant column,
+// no per-table configuration, and never the literal token.
+func TestWhere_PlatformTenantEmitsPublicPredicate(t *testing.T) {
 	pol := policy.Policy{
 		ID: "aic-managed",
 		Statements: []policy.Statement{
@@ -544,12 +544,123 @@ func TestWhere_PlatformPolicyResolvedByConstrain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Where: %v", err)
 	}
-	wantSQL := "tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')"
+	wantSQL := "issuer = 'public' AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')"
 	if sql != wantSQL {
 		t.Errorf("sql = %q, want %q", sql, wantSQL)
 	}
-	if !reflect.DeepEqual(args, []any{tenant, "file", "datalake", "datalake/%"}) {
-		t.Errorf("args = %#v", args)
+	if !reflect.DeepEqual(args, []any{"file", "datalake", "datalake/%"}) {
+		t.Errorf("args = %#v, want [file datalake datalake/%%]", args)
+	}
+	for _, a := range args {
+		if a == crn.PlatformTenant {
+			t.Errorf("emitted the literal token %q as a bound value", crn.PlatformTenant)
+		}
+	}
+}
+
+// A caller's own "self" grant and a platform-issued "aic" grant compose
+// natively: orGroups ORs the two allow groups, the self group bound to the
+// requesting tenant and the aic group to the fixed issuer = 'public' predicate.
+func TestWhere_CallerPlusPlatformOrsClause(t *testing.T) {
+	policies := []policy.Policy{
+		{ID: "own", Statements: []policy.Statement{
+			{Sid: "own", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+				Resources: []string{"crn:self:*:file:*:file:mine/**"}}}},
+		{ID: "aic", Statements: []policy.Statement{
+			{Sid: "aic", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:file:*:file:shared/**", crn.PlatformTenant)}}}},
+	}
+	c := engine.Constrain(policies, "file:listFiles", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, mapping())
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	wantSQL := "(tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')) OR " +
+		"(issuer = 'public' AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\'))"
+	if sql != wantSQL {
+		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
+	}
+	wantArgs := []any{
+		tenant, "file", "mine", "mine/%",
+		"file", "shared", "shared/%",
+	}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %#v, want %#v", args, wantArgs)
+	}
+}
+
+// A platform-issued deny subtracts platform rows: its predicate is also the
+// fixed issuer = 'public' marker and subtracted via IS NOT TRUE (deny-wins).
+func TestWhere_PlatformDenySubtractsRow(t *testing.T) {
+	policies := []policy.Policy{
+		{ID: "aic", Statements: []policy.Statement{
+			{Sid: "aic-allow", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:file:*:file:shared/**", crn.PlatformTenant)}},
+			{Sid: "aic-deny", Effect: policy.Deny, Actions: []string{"*"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:file:*:file:shared/secret/**", crn.PlatformTenant)}},
+		}},
+	}
+	c := engine.Constrain(policies, "file:listFiles", tenant, nil)
+
+	sql, args, err := sqlfilter.Where(c, mapping())
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	wantSQL := "(issuer = 'public' AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')) " +
+		"AND ((issuer = 'public' AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\\')) IS NOT TRUE)"
+	if sql != wantSQL {
+		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
+	}
+	wantArgs := []any{
+		"file", "shared", "shared/%",
+		"file", "shared/secret", "shared/secret/%",
+	}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %#v, want %#v", args, wantArgs)
+	}
+}
+
+// A caller's own grant may carry an id/path filter and residual conditions
+// (e.g. status = active); those attach only to the own group. Public ("aic")
+// rows come through their own OR group, unaffected by the caller's filters.
+func TestWhere_PublicRowsBypassOwnFilters(t *testing.T) {
+	const ownID = "11111111-1111-1111-1111-111111111111"
+	policies := []policy.Policy{
+		{ID: "own", Statements: []policy.Statement{
+			{Sid: "own", Effect: policy.Allow, Actions: []string{"config:listDataset"},
+				Resources:  []string{fmt.Sprintf("crn:%s:*:config::dataset:%s", tenant, ownID)},
+				Conditions: policy.Conditions{conditionoperator.StringEquals: {"status": {"active"}}}}}},
+		{ID: "public", Statements: []policy.Statement{
+			{Sid: "public", Effect: policy.Allow, Actions: []string{"config:listDataset"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:*", crn.PlatformTenant)}}}},
+	}
+	// status is a resource attribute (absent from context) -> stays residual.
+	c := engine.Constrain(policies, "config:listDataset", tenant, nil)
+
+	m := sqlfilter.Mapping{
+		Service: "config",
+		Tenant:  "tenant_id",
+		Fixed: map[sqlfilter.Segment]string{
+			sqlfilter.SegmentScope:  "",
+			sqlfilter.SegmentRegion: "",
+			sqlfilter.SegmentType:   "dataset",
+		},
+		Resource:                  sqlfilter.ResourceColumn{ID: "id"},
+		Conditions:                map[string]string{"status": "status"},
+		AllowedConditionOperators: map[string][]string{"status": {conditionoperator.StringEquals}},
+	}
+	sql, args, err := sqlfilter.Where(c, m)
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	// The id + status filter is confined to the own group; public is untouched.
+	wantSQL := "(tenant_id = ? AND id = ? AND status = ?) OR (issuer = 'public')"
+	if sql != wantSQL {
+		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
+	}
+	if !reflect.DeepEqual(args, []any{tenant, ownID, "active"}) {
+		t.Errorf("args = %#v, want [tenant ownID active]", args)
 	}
 }
 
@@ -641,10 +752,10 @@ func TestWhere_FixedSegments(t *testing.T) {
 	}
 }
 
-// A platform-published collection (managed policies, a global catalog) owns
-// rows under the platform tenant. This input is independently known to contain
-// only a platform-placeholder grant, so the tenant predicate can be declared
-// answered while the service applies its own row-visibility clause.
+// A projection whose tenant scoping is enforced outside the filter can declare
+// TenantAnswered — the escape hatch — so no tenant predicate is emitted, while
+// the service applies its own row-visibility clause. (Prefer the default
+// issuer = 'public' handling for ordinary platform-published tables.)
 func TestWhere_TenantAnswered(t *testing.T) {
 	catalog := sqlfilter.Mapping{
 		Service:        "iam",

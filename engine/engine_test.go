@@ -308,9 +308,9 @@ func TestDecide_CrossTenantResourceNeverMatches(t *testing.T) {
 	}
 }
 
-// platformPolicy is a platform-issued policy: its patterns use the reserved
-// platform token as the tenant placeholder, so one document applies to every
-// tenant.
+// platformPolicy is a platform-issued policy bound to every principal. Its
+// patterns use a reserved tenant token: "aic" for platform-owned rows, or
+// "self" for the requesting tenant's own rows.
 func platformPolicy(statements ...policy.Statement) policy.Policy {
 	return policy.Policy{
 		ID:         "aic-managed",
@@ -319,29 +319,70 @@ func platformPolicy(statements ...policy.Statement) policy.Policy {
 	}
 }
 
-func TestDecide_PlatformPolicyAppliesToAnyTenant(t *testing.T) {
-	// A platform-issued allow grants the action on the requesting tenant's own
-	// resources without naming that tenant anywhere in the document.
+func TestDecide_PlatformPatternMatchesPlatformOwnedOnly(t *testing.T) {
+	// After the aic/self split, an "aic" pattern matches platform-owned rows
+	// only: it grants on a platform-owned resource but nothing on a tenant's
+	// own resource (the closed R3 cross-tenant hole).
 	pol := platformPolicy(policy.Statement{
 		Sid:       "aic-read-datalake",
 		Effect:    policy.Allow,
 		Actions:   []string{"file:getFile"},
 		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/**", crn.PlatformTenant)},
 	})
-	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/reports/q1.csv")}
-	got := engine.Decide([]policy.Policy{pol}, req)
+
+	platformRes, err := crn.Build(crn.PlatformTenant, owner, "file", "", "file", "datalake/reports/q1.csv")
+	if err != nil {
+		t.Fatalf("Build platform resource: %v", err)
+	}
+	got := engine.Decide([]policy.Policy{pol}, engine.Request{
+		Action: "file:getFile", Resource: platformRes, Tenant: tenant})
 	if !got.Allowed || got.Reason != "aic-read-datalake" {
-		t.Errorf("Decide = {Allowed:%v Reason:%q}, want allow via aic-read-datalake", got.Allowed, got.Reason)
+		t.Errorf("platform-owned = {Allowed:%v Reason:%q}, want allow via aic-read-datalake", got.Allowed, got.Reason)
+	}
+
+	// The caller's own resource is not granted by a platform-owned pattern.
+	got = engine.Decide([]policy.Policy{pol}, engine.Request{
+		Action: "file:getFile", Resource: mustResource(t, "datalake/reports/q1.csv"), Tenant: tenant})
+	if got.Allowed {
+		t.Errorf("aic pattern granted a tenant's own resource; want deny (R3), got %q", got.Reason)
+	}
+}
+
+func TestDecide_SelfPatternMatchesCallerOnly(t *testing.T) {
+	// A "self" pattern matches the caller's own resources (Request.Tenant) and
+	// refuses another tenant's resource — it is not an any-tenant wildcard.
+	pol := platformPolicy(policy.Statement{
+		Sid:       "self-read-datalake",
+		Effect:    policy.Allow,
+		Actions:   []string{"file:getFile"},
+		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/**", crn.CallerTenant)},
+	})
+
+	got := engine.Decide([]policy.Policy{pol}, engine.Request{
+		Action: "file:getFile", Resource: mustResource(t, "datalake/x"), Tenant: tenant})
+	if !got.Allowed || got.Reason != "self-read-datalake" {
+		t.Errorf("self on own resource = {Allowed:%v Reason:%q}, want allow via self-read-datalake", got.Allowed, got.Reason)
+	}
+
+	otherRes, err := crn.Build("11111111-1111-1111-1111-111111111111", owner, "file", "", "file", "datalake/x")
+	if err != nil {
+		t.Fatalf("Build other-tenant resource: %v", err)
+	}
+	got = engine.Decide([]policy.Policy{pol}, engine.Request{
+		Action: "file:getFile", Resource: otherRes, Tenant: tenant})
+	if got.Allowed {
+		t.Errorf("self pattern matched another tenant's resource; want deny, got %q", got.Reason)
 	}
 }
 
 func TestDecide_PlatformGuardrailDenyWins(t *testing.T) {
-	// A platform-issued deny is a guardrail: it overrides a tenant's own allow.
+	// A platform-issued deny is a guardrail on the caller's own resources: it
+	// uses "self" so it overrides that tenant's own allow (deny-wins).
 	guardrail := platformPolicy(policy.Statement{
 		Sid:       "aic-protect-secrets",
 		Effect:    policy.Deny,
 		Actions:   []string{"*"},
-		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/secret/**", crn.PlatformTenant)},
+		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/secret/**", crn.CallerTenant)},
 	})
 	// The tenant policy allows the whole datalake and has no deny of its own.
 	tenantAllow := policy.Policy{
@@ -350,7 +391,7 @@ func TestDecide_PlatformGuardrailDenyWins(t *testing.T) {
 				Resources: []string{crnPattern("datalake/**")}},
 		},
 	}
-	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/secret/keys.txt")}
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/secret/keys.txt"), Tenant: tenant}
 	got := engine.Decide([]policy.Policy{tenantAllow, guardrail}, req)
 	if got.Allowed || got.Reason != "aic-protect-secrets" {
 		t.Errorf("Decide = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)

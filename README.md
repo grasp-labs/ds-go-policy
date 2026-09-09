@@ -78,6 +78,7 @@ if err != nil {
 decision := engine.Decide(policies, engine.Request{
 	Action:   "file:updateFile", // "{service}:{operation}"
 	Resource: resource,
+	Tenant:   tenantID, // the caller's tenant; matched by "self" patterns
 	Context:  map[string]string{"tag.classification": "internal"},
 })
 
@@ -197,12 +198,53 @@ if err != nil {
 // crn:{tenant}::iam::role:*      ->  selects nothing here (it's the roles table's grant)
 ```
 
-A platform-published table (managed policies, a global catalog) is different:
-the pattern's tenant is *who may use the grant*, not *who owns the row*. A
-`tenant_id = ?` clause would hide every public row. Use `TenantAnswered` only
+A platform-published table (a managed catalog like `dataset`) holds rows the
+platform owns, addressed by `aic` patterns. Only the platform tenant may publish
+them, and by convention every such table marks them with `issuer = 'public'`, so
+the adapter emits that fixed predicate for an `aic` pattern — no per-table
+configuration. This composes natively — `orGroups` already ORs the allow groups
+— so a caller holding their own `self` statement plus a platform-issued public
+one yields exactly the union of both:
+
+```go
+// cons: allow config:listDataset on crn:self:*:config::dataset:*  (owner_id = ownerA)
+//   +   allow config:listDataset on crn:aic:*:config::dataset:*   (platform public)
+cons := engine.Constrain(policies, "config:listDataset", tenantID, nil)
+
+where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
+	Service: "config",
+	Tenant:  "dataset.tenant_id",
+	Fixed: map[sqlfilter.Segment]string{
+		sqlfilter.SegmentScope:  "",
+		sqlfilter.SegmentRegion: "",
+		sqlfilter.SegmentType:   "dataset",
+	},
+	Resource:   sqlfilter.ResourceColumn{ID: "dataset.id"},
+	Conditions: map[string]string{"owner_id": "dataset.owner_id"},
+	AllowedConditionOperators: map[string][]string{
+		"owner_id": {conditionoperator.StringEquals},
+	},
+})
+if err != nil {
+	return err
+}
+// where:
+//   ((dataset.tenant_id = ? AND dataset.owner_id = ?)
+//     OR (issuer = 'public'))
+// args:
+//   [tenantID, "ownerA"]
+```
+
+The caller's own `owner_id`/`id`/`status` filters live only inside the `self`
+group; the public group is independent, so public rows are never narrowed by the
+caller's filters (this matters on list endpoints). Denies work the same way: a
+platform-issued deny also carries `issuer = 'public'` and subtracts the matching
+platform rows.
+
+`TenantAnswered` remains the escape hatch for a projection whose tenant scoping
+is enforced outside the filter — it emits no tenant predicate at all. Use it only
 after independently establishing that the retained grants apply to this
-published tenant projection; the service must also add its own visibility
-predicate:
+projection, and add the service's own visibility predicate:
 
 ```go
 // publishedCons contains only grants established for this projection.
@@ -263,40 +305,72 @@ A CRN names a resource:
 crn:{tenant}:{scope}:{service}:{region}:{type}:{resource}
 ```
 
-- `tenant` is a UUID (tenant isolation — never a wildcard), or the reserved
-platform token `aic` (see below).
+- `tenant` is a UUID (tenant isolation — never a wildcard), or one of the two
+reserved tokens `aic` (platform-owned) and `self` (the requesting tenant, in a
+pattern only — see below).
 - `resource` is an S3-style relative path (no leading/trailing `/`); it may
 contain `:` since it is the final field.
 
 ### The platform tenant — `aic`
 
-`aic` is a reserved token in the tenant position for **platform-issued
-policies usable by all tenants** (`crn.PlatformTenant`):
+The tenant position carries two reserved tokens with distinct meanings. `aic`
+(`crn.PlatformTenant`) names platform-owned resources; `self`
+(`crn.CallerTenant`) stands for the requesting tenant. Keeping them separate is
+what lets one platform-issued document grant every tenant read access to a
+shared table *without* also granting cross-tenant access to private rows.
 
-- In a **concrete CRN**, `aic` names a platform-owned resource.
-- In a **resource pattern**, `aic` is a placeholder for the requesting tenant:
-the pattern matches resources of *any* tenant, so one platform-issued document
-(a managed allow, or a guardrail deny) applies to every tenant it is bound to.
+| pattern tenant  | `Decide` matches                             | `Constrain` keeps                              |
+| --------------- | -------------------------------------------- | ---------------------------------------------- |
+| concrete UUID   | resources of that tenant                     | only when it equals the request tenant         |
+| `aic`           | platform-owned resources only                | as-is, unrewritten, for the adapter            |
+| `self`          | resources whose tenant equals the caller's   | rewritten to the request tenant                |
+
+- `self` is valid in a **resource pattern only**. A concrete CRN is a real
+resource identity, so `crn.Parse` rejects `self` there — an identity can't be
+"self".
+- `aic` is exact in both positions: a concrete `crn:aic:...` is a platform-owned
+resource, and an `aic` pattern matches only those platform-owned rows (never
+another tenant's).
 - The engine evaluates whatever policy set the caller binds to a principal;
-restricting who may *author* `crn:aic:...` patterns is the responsibility of
-the policy management plane that issues and stores policies.
+restricting who may *author* `crn:aic:...` or `crn:self:...` patterns is the
+responsibility of the policy management plane that issues and stores policies.
+
+Public visibility is then a single platform-issued statement, bound to every
+principal, and nothing else:
 
 ```json
 {
-  "id": "aic-managed-guardrail",
+  "id": "aic-public-datasets",
   "statements": [{
-    "sid": "aic-protect-secrets",
-    "effect": "deny",
-    "actions": ["*"],
-    "resources": ["crn:aic:*:file::file:**/secrets/**"]
+    "sid": "aic-list-public-datasets",
+    "effect": "allow",
+    "actions": ["config:listDataset"],
+    "resources": ["crn:aic:*:config::dataset:*"]
   }]
 }
 ```
 
-For list/query paths, `engine.Constrain` takes the requesting tenant (the same
-fact `Decide` reads from `Request.Resource`) and resolves the placeholder to it
-before emitting constraints — adapters only ever see concrete tenants and never
-interpret policy.
+A caller's own grant uses `self`, which matches (and, at list time, is rewritten
+to) their own tenant:
+
+```json
+{
+  "id": "own-datasets",
+  "statements": [{
+    "sid": "own-datasets",
+    "effect": "allow",
+    "actions": ["config:listDataset"],
+    "resources": ["crn:self:*:config::dataset:*"]
+  }]
+}
+```
+
+For request gating, `Compiled.Decide` matches `self` against `Request.Tenant`
+(the caller's tenant, distinct from `Request.Resource.Tenant`, which owns the
+resource acted on). For list/query paths, `engine.Constrain` takes the
+requesting tenant, rewrites `self` to it, and keeps `aic` unrewritten so the
+adapter can bind it to the table's platform-owned id — adapters only ever see a
+concrete tenant or the `aic` token, and never interpret policy.
 
 `crn.Parse` validates a serialized CRN; `crn.Build` constructs a canonical one
 (stripping leading/trailing slashes from the resource).

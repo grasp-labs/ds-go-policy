@@ -1,0 +1,18 @@
+{
+  "id": "dataset-owner-grant",
+  "name": "Dataset owner grant",
+  "version": "1.0.0",
+  "statements": [
+    {
+      "sid": "own-single-dataset",
+      "effect": "allow",
+      "actions": [
+        "config:listDataset",
+        "config:getDataset"
+      ],
+      "resources": [
+        "crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:config::dataset:11111111-1111-1111-1111-111111111111"
+      ]
+    }
+  ]
+}

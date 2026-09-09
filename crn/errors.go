@@ -12,12 +12,19 @@ var (
 	ErrInvalidPartCount = errors.New("invalid part count")
 	ErrInvalidPrefix    = errors.New("invalid prefix")
 	ErrInvalidPattern   = errors.New("invalid CRN pattern")
-	// ErrInvalidTenant: the tenant field must be a UUID or PlatformTenant.
+	// ErrInvalidTenant: the tenant field must be a UUID, the PlatformTenant
+	// token, or (in a pattern only) the CallerTenant token.
 	ErrInvalidTenant = errors.New("invalid tenant")
 	ErrLeadingSlash  = errors.New("leading slash in resource")
 	ErrTrailingSlash = errors.New("trailing slash in resource")
 	ErrInvalidField  = errors.New("field contains delimiter")
 )
+
+// errSelfInConcreteCRN rejects the CallerTenant token outside a pattern. It is
+// internal: Parse and Build discard the returned error and report ErrInvalidTenant
+// with structured context, so the token is classified with errors.Is like any
+// other bad tenant.
+var errSelfInConcreteCRN = errors.New("crn: caller tenant token is only valid in a pattern")
 
 // ParseError describes why a CRN string, pattern, or field was rejected. It
 // wraps a sentinel kind (see the Err* vars) so callers can classify with
