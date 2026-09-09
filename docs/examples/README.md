@@ -125,14 +125,55 @@ policy.
      platform token `aic` (`crn.PlatformTenant`); rows an issuer published for all.
 
 The engine composes whatever policy set the caller resolves for a principal, so
-these two documents combine at evaluation time. At list time `sqlfilter.Where`
-yields the union — the caller's own row OR all public rows (marked by the fixed
-`issuer = 'public'` convention) — and nothing from another tenant:
+these two documents combine at evaluation time. Listing a `dataset` table:
+
+```go
+// caller tenant = "ba62a53f-afa9-427d-9d91-c7987bc5662e" (from the JSON)
+cons := engine.Constrain(policies, "config:listDataset", tenant, nil)
+
+where, args, _ := sqlfilter.Where(cons, sqlfilter.Mapping{
+	Service: "config",
+	Tenant:  "tenant_id",
+	Fixed: map[sqlfilter.Segment]string{
+		sqlfilter.SegmentScope:  "",
+		sqlfilter.SegmentRegion: "",
+		sqlfilter.SegmentType:   "dataset",
+	},
+	Resource: sqlfilter.ResourceColumn{ID: "id"},
+})
+```
+
+`sqlfilter.Where` returns the union — the caller's own row OR all public rows
+(marked by the fixed `issuer = 'public'` convention), and nothing from another
+tenant:
 
 ```sql
+-- where:
 (tenant_id = ? AND id = ?)   -- the caller's granted dataset
   OR (issuer = 'public')      -- every public/platform-owned dataset
+
+-- args:
+["ba62a53f-afa9-427d-9d91-c7987bc5662e", "11111111-1111-1111-1111-111111111111"]
+```
+
+Bound, the effective clause is:
+
+```sql
+(tenant_id = 'ba62a53f-afa9-427d-9d91-c7987bc5662e'
+   AND id = '11111111-1111-1111-1111-111111111111')
+  OR (issuer = 'public')
 ```
 
 The caller's own `id`/`status`/etc. filters stay inside the first group, so they
-never narrow the public rows (important for list endpoints).
+never narrow the public rows (important for list endpoints). If the owner grant
+also carried, say, `StringEquals status = active` (a residual condition mapped
+via `Mapping.Conditions`), only the own group gains it:
+
+```sql
+(tenant_id = ? AND id = ? AND status = ?)   -- args: [..., ..., "active"]
+  OR (issuer = 'public')                     -- public rows still unfiltered
+```
+
+Both clauses are asserted verbatim by the test suite
+(`TestExample_SingleResourceAndPublic`, `TestWhere_PublicRowsBypassOwnFilters`),
+so these examples stay in sync with the adapter.
