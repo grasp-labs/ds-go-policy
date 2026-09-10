@@ -199,21 +199,23 @@ if err != nil {
 ```
 
 A platform-published table (a managed catalog like `dataset`) holds rows the
-platform owns, addressed by `aic` patterns. Only the platform tenant may publish
-them, and by convention every such table marks them with `issuer = 'public'`, so
-the adapter emits that fixed predicate for an `aic` pattern — no per-table
-configuration. This composes natively — `orGroups` already ORs the allow groups
-— so a caller holding their own `self` statement plus a platform-issued public
-one yields exactly the union of both:
+platform owns. Only the platform tenant may publish them, and by convention every
+such table marks them with `issuer = 'public'`. `PublicRows` declares that a
+mapping reads such a table: its published rows are then readable by every
+principal that already holds the action, so no policy has to name them.
+
+Requiring every policy to carry an `aic` statement instead would be a footgun —
+a tenant whose only grant pins one of its own datasets would silently lose the
+published rows, because that pattern narrows to a single id:
 
 ```go
-// cons: allow config:listDataset on crn:self:*:config::dataset:*  (owner_id = ownerA)
-//   +   allow config:listDataset on crn:aic:*:config::dataset:*   (platform public)
+// cons: allow config:listDataset on crn:self:*:config::dataset:*, owner_id = ownerA
 cons := engine.Constrain(policies, "config:listDataset", tenantID, nil)
 
 where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
-	Service: "config",
-	Tenant:  "dataset.tenant_id",
+	Service:    "config",
+	Tenant:     "dataset.tenant_id",
+	PublicRows: true,
 	Fixed: map[sqlfilter.Segment]string{
 		sqlfilter.SegmentScope:  "",
 		sqlfilter.SegmentRegion: "",
@@ -228,47 +230,27 @@ where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
 if err != nil {
 	return err
 }
-// where:
-//   ((dataset.tenant_id = ? AND dataset.owner_id = ?)
-//     OR (issuer = 'public'))
-// args:
-//   [tenantID, "ownerA"]
+// where: (dataset.tenant_id = ? AND dataset.owner_id = ?) OR issuer = 'public'
+// args:  [tenantID, "ownerA"]
 ```
 
-The caller's own `owner_id`/`id`/`status` filters live only inside the `self`
-group; the public group is independent, so public rows are never narrowed by the
-caller's filters (this matters on list endpoints). Denies work the same way: a
-platform-issued deny also carries `issuer = 'public'` and subtracts the matching
-platform rows.
+The caller's `owner_id`/`id`/`status` filters live only inside their own group, so
+the published rows are never narrowed by them (this matters on list endpoints).
+The flag widens an existing grant and never creates one: with no applicable allow
+for the action the clause is still `1=0`, and a platform-issued (`aic`) deny still
+subtracts published rows — that is how the platform withdraws one of them.
 
-Where the platform's rows are part of the product rather than something a tenant
-subscribes to, requiring every policy to carry the `aic` statement is a footgun:
-a tenant whose only grant pins one of its own datasets would silently lose them,
-because that pattern narrows to a single id. `PublicRows` declares the table's
-published rows readable by every principal that already holds the action, and the
-adapter ORs the marker onto the allow clause:
-
-```go
-// cons: allow config:listDataset on crn:{tenant}:*:config::dataset:{ownID} only
-where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
-	Service:    "config",
-	Tenant:     "dataset.tenant_id",
-	PublicRows: true,
-	Fixed: map[sqlfilter.Segment]string{
-		sqlfilter.SegmentScope:  "",
-		sqlfilter.SegmentRegion: "",
-		sqlfilter.SegmentType:   "dataset",
-	},
-	Resource: sqlfilter.ResourceColumn{ID: "dataset.id"},
-})
-// where: (dataset.tenant_id = ? AND dataset.id = ?) OR issuer = 'public'
-// args:  [tenantID, ownID]
-```
-
-It widens an existing grant, never creates one: with no applicable allow for the
-action the clause is still `1=0`, and an `aic` deny still subtracts published
-rows. Set it only on the mapping a read uses — a write mapping that sets it lets
-a tenant edit what the platform published.
+`PublicRows` is also what admits an `aic` pattern at all. It is the one pattern
+shape that does not bind the tenant column — it emits the fixed `issuer = 'public'`
+predicate instead — so a mapping without the flag drops it, the way it drops a
+pattern for another tenant or another service. **A write filter therefore leaves
+the flag off, and then no policy, however it names those rows, can update or
+delete what the platform published.** The platform itself is unaffected: it owns
+those rows, so an ordinary `self` or concrete-tenant pattern binds them by tenant
+column. On a read mapping an `aic` allow selects nothing the marker does not
+already select, so it stays out of the clause and counts only as a grant on the
+table — a principal whose sole grant for the action is the platform's bound public
+policy reads the published rows and nothing else.
 
 `TenantAnswered` remains the escape hatch for a projection whose tenant scoping
 is enforced outside the filter — it emits no tenant predicate at all. Use it only

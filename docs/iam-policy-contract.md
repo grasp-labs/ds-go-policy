@@ -194,7 +194,7 @@ type Mapping struct {
     Service                    string              // required table service; must not be "*"
     Tenant, Scope, Region, Type string              // column names (Scope -> owner_id/owners)
     TenantAnswered             bool                // tenant enforced outside the filter (escape hatch)
-    PublicRows                 bool                // reads: OR issuer = 'public' onto the allow clause
+    PublicRows                 bool                // reads: OR issuer = 'public'; also admits "aic" patterns
     Fixed                      map[Segment]string  // per-table constants; use "" for an absent segment
     Resource                   ResourceColumn      // id column and/or path column
     Conditions                map[string]string   // residual condition key -> trusted column/expression
@@ -205,19 +205,23 @@ type Mapping struct {
 func Where(c engine.Constraints, m Mapping) (sql string, args []any, err error)
 ```
 
-An `aic` (platform-published) pattern emits the fixed `issuer = 'public'`
-predicate — every platform-published table marks its rows by that convention, so
-no per-table configuration is needed. This composes natively with a caller's own
-`self` grant: `orGroups` ORs the two, yielding the caller's rows plus the
-platform's public rows. The caller's own id/condition filters stay inside the
-`self` group and never narrow public rows.
+`PublicRows` declares that the mapping reads a platform-published table: any
+principal already holding the action reads its published rows, no statement
+required. The fixed `issuer = 'public'` marker is OR-ed onto the allow clause —
+every platform-published table marks its rows by that convention, so no per-table
+configuration is needed — which widens an existing grant and never creates one (an
+empty allow still yields `1=0`). The caller's own id/condition filters stay inside
+the caller's group and never narrow published rows, and an `aic` deny still
+subtracts them.
 
-`PublicRows` makes that visibility unconditional for tables whose published rows
-are part of the product: any principal already holding the action reads them, no
-statement required. The marker is OR-ed onto the allow clause, so it widens an
-existing grant and never creates one — an empty allow still yields `1=0` — and an
-`aic` deny still subtracts. Reads only: a write mapping that sets it would let a
-tenant edit platform-published rows.
+The flag is also what admits an `aic` pattern at all. That pattern is the one
+shape which does not bind the mapping's tenant column, emitting the marker
+instead, so a mapping without the flag drops it as it drops a pattern for another
+tenant. **A write mapping leaves the flag off; no policy can then reach
+platform-published rows through a write filter.** The platform writes its own rows
+by ownership, through an ordinary `self` or concrete-tenant pattern. On a read
+mapping an `aic` allow adds nothing to the marker and stays out of the clause,
+counting only as a grant on the table.
 
 > **Trust invariant — `issuer = 'public'` is trusted.** The filter authorizes a
 > row to every principal *because the row asserts `issuer = 'public'`*. It does
@@ -232,6 +236,10 @@ tenant edit platform-published rows.
 >    so the two cannot drift.
 > 2. When `issuer = 'public'` is set, the row is platform-owned — its `tenant_id`
 >    (owner) is the platform tenant id.
+> 3. Neither field is writable after creation: an update preserves the stored
+>    `tenant_id` and `issuer` rather than restamping them from the request, so an
+>    authorized edit of a published row cannot move it to another tenant or
+>    unpublish it.
 >
 > If any write path violates (1), a tenant can publish its own row to every other
 > tenant — a cross-tenant read leak the policy engine cannot detect, because by

@@ -100,7 +100,10 @@ type ResourceColumn struct {
 // concrete or "self" pattern emits Tenant = ?; a pattern bound to
 // crn.PlatformTenant ("aic") names platform-published rows, which every table
 // marks with the fixed convention issuer = 'public' — the adapter emits that
-// predicate directly, so no per-table configuration is required.
+// predicate directly, so no per-table configuration is required. Such a pattern
+// requires PublicRows: without it the mapping has not declared the marker
+// readable, and the pattern selects nothing rather than reaching rows the tenant
+// column would otherwise exclude.
 //
 // TenantAnswered declares the tenant predicate is enforced outside the filter,
 // so no tenant predicate is emitted for either a concrete or a platform pattern.
@@ -112,9 +115,10 @@ type ResourceColumn struct {
 // principal that holds the action, so the filter ORs issuer = 'public' onto the
 // allow clause instead of requiring a pattern to name them. It widens only what
 // an existing grant already opened: with no applicable allow the clause stays
-// closed, and denies still subtract. Set it on the mapping a read uses; a
-// mapping used for writes must leave it off, or a tenant could edit rows the
-// platform published. The trust invariant below applies.
+// closed, and denies still subtract. It is also what admits an "aic" pattern at
+// all, so a mapping used for writes leaves it off and no policy — however it
+// names those rows — can reach them; the owning tenant still writes its own rows
+// through the tenant column. The trust invariant below applies.
 //
 // Scope, Region and Type are columns for segments that vary per row. A column
 // may be empty when applicable patterns use the wildcard or Fixed declares the
@@ -159,18 +163,36 @@ func Where(c engine.Constraints, m Mapping) (string, []any, error) {
 	if m.Tenant != "" && m.TenantAnswered {
 		return "", nil, ErrTenantConflict
 	}
-	allowSQL, allowArgs, err := orGroups(c.Allow, m)
+	// On a PublicRows table an allow pattern bound to the platform tenant selects
+	// nothing the marker below does not already select, so it is kept out of the
+	// clause and only remembered as a grant on the table. Denies keep theirs: an
+	// "aic" deny is how the platform withdraws one published row.
+	allows, publicGrant := c.Allow, false
+	if m.PublicRows {
+		allows = make([]engine.ResourceMatch, 0, len(c.Allow))
+		for _, a := range c.Allow {
+			if a.Pattern.Tenant() == crn.PlatformTenant {
+				publicGrant = true
+				continue
+			}
+			allows = append(allows, a)
+		}
+	}
+	allowSQL, allowArgs, err := orGroups(allows, m)
 	if err != nil {
 		return "", nil, err
 	}
-	if allowSQL == "" {
+	if allowSQL == "" && !publicGrant {
 		return closedClause, nil, nil
 	}
 	// A grant over any row of a PublicRows table also opens its platform-published
 	// rows. The OR sits inside the allow clause, so a pattern that narrows the
 	// caller's own rows by id, owner or condition cannot narrow these away, and
 	// the deny composition below still subtracts them.
-	if m.PublicRows {
+	switch {
+	case allowSQL == "":
+		allowSQL, allowArgs = platformOwnedPredicate, nil
+	case m.PublicRows:
 		allowSQL = "(" + allowSQL + ") OR " + platformOwnedPredicate
 	}
 	denySQL, denyArgs, err := orGroups(c.Deny, m)
@@ -259,6 +281,14 @@ func group(rm engine.ResourceMatch, m Mapping) (string, []any, bool, error) {
 	// tenant scoping itself (see Mapping).
 	if !m.TenantAnswered {
 		if p.Tenant() == crn.PlatformTenant {
+			// The marker is a read-only concept: it authorizes a row to every
+			// principal, so honouring it on a mapping that has not declared
+			// PublicRows would let one pattern shape slip past the tenant column the
+			// mapping binds — a write filter would match platform-published rows.
+			// Such a pattern selects nothing here, as one for another tenant does.
+			if !m.PublicRows {
+				return "", nil, false, nil
+			}
 			preds = append(preds, platformOwnedPredicate)
 		} else {
 			preds = append(preds, m.Tenant+" = ?")

@@ -308,8 +308,9 @@ func TestExample_SingleResourceAndPublic(t *testing.T) {
 	cons := engine.Constrain(policies, "config:listDataset", tenant, nil)
 
 	where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
-		Service: "config",
-		Tenant:  "tenant_id",
+		Service:    "config",
+		Tenant:     "tenant_id",
+		PublicRows: true,
 		Fixed: map[sqlfilter.Segment]string{
 			sqlfilter.SegmentScope:  "",
 			sqlfilter.SegmentRegion: "",
@@ -322,8 +323,11 @@ func TestExample_SingleResourceAndPublic(t *testing.T) {
 	}
 
 	// Own row bound to the request tenant + granted id; public rows marked by the
-	// fixed issuer = 'public' convention — never the literal "aic" token.
-	wantWhere := "(tenant_id = ? AND id = ?) OR (issuer = 'public')"
+	// fixed issuer = 'public' convention — never the literal "aic" token. The
+	// marker comes from the mapping's PublicRows, which is also what admits the
+	// bound public policy's "aic" pattern: a mapping without it (a write filter)
+	// would drop that pattern and select the caller's row alone.
+	wantWhere := "(tenant_id = ? AND id = ?) OR issuer = 'public'"
 	if where != wantWhere {
 		t.Errorf("where =\n  %q\nwant\n  %q", where, wantWhere)
 	}
