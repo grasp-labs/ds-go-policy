@@ -219,24 +219,23 @@ func TestConstrain_RejectsNonConcreteActions(t *testing.T) {
 	}
 }
 
-// Constrain applies the same tenant handling as Decide: a "self" pattern is
-// rewritten to the requesting tenant, an "aic" (platform) pattern is kept
-// unrewritten for the adapter to bind, and a pattern naming another tenant is
-// dropped.
+// Constrain applies the same tenant handling as Decide: the token is resolved to
+// the requesting tenant, for either effect, and a pattern naming another tenant is
+// dropped. Adapters therefore only ever see the requesting tenant.
 func TestConstrain_TenantMatching(t *testing.T) {
 	otherTenant := "11111111-1111-1111-1111-111111111111"
-	platform := policy.Policy{
-		ID: "aic-managed",
+	tokenDeny := policy.Policy{
+		ID: "managed-guardrail",
 		Statements: []policy.Statement{{
-			Sid: "aic-deny-secrets", Effect: policy.Deny, Actions: []string{"*"},
+			Sid: "deny-secrets", Effect: policy.Deny, Actions: []string{"*"},
 			Resources: []string{fmt.Sprintf("crn:%s:*:file::file:**/secrets/**", crn.PlatformTenant)},
 		}},
 	}
-	selfPol := policy.Policy{
-		ID: "self",
+	tokenAllow := policy.Policy{
+		ID: "managed-allow",
 		Statements: []policy.Statement{{
-			Sid: "self-allow", Effect: policy.Allow, Actions: []string{"file:listFiles"},
-			Resources: []string{fmt.Sprintf("crn:%s:*:file::file:mine/**", crn.CallerTenant)},
+			Sid: "allow-mine", Effect: policy.Allow, Actions: []string{"file:listFiles"},
+			Resources: []string{fmt.Sprintf("crn:%s:*:file::file:mine/**", crn.PlatformTenant)},
 		}},
 	}
 	otherPol := policy.Policy{
@@ -247,36 +246,36 @@ func TestConstrain_TenantMatching(t *testing.T) {
 		}},
 	}
 
-	c := engine.Constrain([]policy.Policy{constrainPolicy(), platform, selfPol, otherPol},
+	c := engine.Constrain([]policy.Policy{constrainPolicy(), tokenDeny, tokenAllow, otherPol},
 		"file:listFiles", constrainTenant, nil)
 
-	// The "aic" deny is kept unrewritten so the adapter can bind it to the
-	// table's platform-owned id.
-	var sawAic bool
+	// A token deny is resolved like any other pattern: it constrains the caller's
+	// own rows. It cannot reach another tenant's, published or not.
+	var sawDeny bool
 	for _, rm := range c.Deny {
 		if rm.Pattern.Resource() == "**/secrets/**" {
-			sawAic = true
-			if rm.Pattern.Tenant() != crn.PlatformTenant {
-				t.Errorf("aic deny rewritten to %q; want kept as %q", rm.Pattern.Tenant(), crn.PlatformTenant)
+			sawDeny = true
+			if rm.Pattern.Tenant() != constrainTenant {
+				t.Errorf("token deny tenant = %q, want %q (resolved)", rm.Pattern.Tenant(), constrainTenant)
 			}
 		}
 	}
-	if !sawAic {
-		t.Fatalf("platform deny missing; got %v", denyPaths(c))
+	if !sawDeny {
+		t.Fatalf("token deny missing; got %v", denyPaths(c))
 	}
 
-	// The "self" allow is rewritten to the requesting tenant.
-	var sawSelf bool
+	// A token allow is resolved to the requesting tenant.
+	var sawAllow bool
 	for _, rm := range c.Allow {
 		if rm.Pattern.Resource() == "mine/**" {
-			sawSelf = true
+			sawAllow = true
 			if rm.Pattern.Tenant() != constrainTenant {
-				t.Errorf("self allow tenant = %q, want %q (rewritten)", rm.Pattern.Tenant(), constrainTenant)
+				t.Errorf("token allow tenant = %q, want %q (resolved)", rm.Pattern.Tenant(), constrainTenant)
 			}
 		}
 	}
-	if !sawSelf {
-		t.Fatalf("self allow missing; got %v", allowPaths(c))
+	if !sawAllow {
+		t.Fatalf("token allow missing; got %v", allowPaths(c))
 	}
 
 	// The other tenant's allow cannot match this request and is dropped.

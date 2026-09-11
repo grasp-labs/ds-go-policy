@@ -157,91 +157,54 @@ func TestParseErrorDetail(t *testing.T) {
 	}
 }
 
-func TestPlatformTenant(t *testing.T) {
-	// Parse and Build accept the reserved platform token, and it round-trips.
-	in := fmt.Sprintf("crn:%s:%s:file::file:shared/datasets", PlatformTenant, scope)
-	c, err := Parse(in)
-	if err != nil {
-		t.Fatalf("Parse(%q) error: %v", in, err)
-	}
-	if c.Tenant != PlatformTenant {
-		t.Errorf("Parse tenant = %q, want %q", c.Tenant, PlatformTenant)
-	}
-	if got := c.String(); got != in {
-		t.Errorf("round-trip = %q, want %q", got, in)
-	}
-	if b, err := Build(PlatformTenant, scope, "file", "", "file", "x"); err != nil || b.Tenant != PlatformTenant {
-		t.Errorf("Build(platform tenant) = (%v, %v), want tenant %q", b, err, PlatformTenant)
-	}
-	// Only the exact reserved token is accepted — no other non-UUID string.
-	if _, err := Parse(fmt.Sprintf("crn:%s:%s:file::file:x", "platform", scope)); !errors.Is(err, ErrInvalidTenant) {
-		t.Errorf("Parse with unreserved token err = %v, want %v", err, ErrInvalidTenant)
-	}
-}
-
+// The token stands for the caller, so it matches a resource whose tenant equals
+// the requesting tenant and nothing else. A published row is not addressed here:
+// it is owned by the platform tenant like any other row, and its readability is a
+// marker on the row (see the sqlfilter adapter).
 func TestMatchesPlatformTenant(t *testing.T) {
-	// An "aic" pattern names platform-owned rows only: it matches a resource
-	// whose tenant is the platform token, and nothing else.
 	p, err := ParsePattern(fmt.Sprintf("crn:%s:*:file::file:datalake/**", PlatformTenant))
 	if err != nil {
 		t.Fatalf("ParsePattern error: %v", err)
 	}
-	platformRes := CRN{Tenant: PlatformTenant, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"}
-	if !p.Matches(platformRes, tenant) {
-		t.Errorf("aic pattern did not match a platform-owned resource")
+	own := CRN{Tenant: tenant, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"}
+	if !p.Matches(own, tenant) {
+		t.Errorf("the token did not match the caller's own resource")
 	}
-	// It must NOT reach into a tenant's own rows (the old cross-tenant hole).
-	for _, tn := range []string{tenant, scope} {
-		c := CRN{Tenant: tn, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"}
-		if p.Matches(c, tenant) {
-			t.Errorf("aic pattern matched tenant %q's resource; want platform-owned only", tn)
-		}
+	// Any other tenant's resource must not match, whichever tenant is asking.
+	foreign := CRN{Tenant: scope, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"}
+	if p.Matches(foreign, tenant) {
+		t.Errorf("the token matched tenant %q's resource; want the caller's only", foreign.Tenant)
 	}
 
-	// The reverse does not hold: a concrete-tenant pattern never matches a
-	// platform-owned resource.
+	// A concrete-tenant pattern matches that tenant's resource and no other.
 	tp, err := ParsePattern(fmt.Sprintf("crn:%s:*:file::file:**", tenant))
 	if err != nil {
 		t.Fatalf("ParsePattern error: %v", err)
 	}
-	if tp.Matches(platformRes, tenant) {
-		t.Errorf("tenant pattern matched a platform resource; want deny")
+	if !tp.Matches(own, tenant) {
+		t.Errorf("concrete pattern did not match its own tenant's resource")
+	}
+	if tp.Matches(foreign, tenant) {
+		t.Errorf("concrete pattern matched another tenant's resource; want deny")
 	}
 }
 
-func TestMatchesCallerTenant(t *testing.T) {
-	// A "self" pattern matches a resource whose tenant equals the requesting
-	// tenant; the engine resolves it against Request.Tenant.
-	p, err := ParsePattern("crn:self:*:file::file:datalake/**")
-	if err != nil {
-		t.Fatalf("ParsePattern(self) error: %v", err)
+// The token is pattern-only: a concrete CRN names a real resource identity, whose
+// tenant is always a real tenant.
+func TestPlatformTenantTokenScope(t *testing.T) {
+	if _, err := ParsePattern(fmt.Sprintf("crn:%s:*:file::file:**", PlatformTenant)); err != nil {
+		t.Errorf("ParsePattern(token) err = %v, want nil", err)
 	}
-	own := CRN{Tenant: tenant, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"}
-	if !p.Matches(own, tenant) {
-		t.Errorf("self pattern did not match the caller's own resource")
+	if _, err := Parse(fmt.Sprintf("crn:%s:%s:file::file:x", PlatformTenant, scope)); !errors.Is(err, ErrInvalidTenant) {
+		t.Errorf("Parse(token) err = %v, want ErrInvalidTenant", err)
 	}
-	// Another tenant's resource must not match — not even the platform's.
-	for _, res := range []CRN{
-		{Tenant: scope, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"},
-		{Tenant: PlatformTenant, Scope: scope, Service: "file", Type: "file", Resource: "datalake/raw"},
-	} {
-		if p.Matches(res, tenant) {
-			t.Errorf("self pattern matched foreign tenant %q; want deny", res.Tenant)
-		}
+	if _, err := Build(PlatformTenant, scope, "file", "", "file", "x"); !errors.Is(err, ErrInvalidTenant) {
+		t.Errorf("Build(token) err = %v, want ErrInvalidTenant", err)
 	}
-}
-
-func TestCallerTenantTokenScope(t *testing.T) {
-	// "self" is valid in a pattern...
-	if _, err := ParsePattern("crn:self:*:file::file:**"); err != nil {
-		t.Errorf("ParsePattern(self) err = %v, want nil", err)
-	}
-	// ...but not in a concrete CRN — a resource identity can't be "self".
-	if _, err := Parse(fmt.Sprintf("crn:%s:%s:file::file:x", CallerTenant, scope)); !errors.Is(err, ErrInvalidTenant) {
-		t.Errorf("Parse(self) err = %v, want ErrInvalidTenant", err)
-	}
-	if _, err := Build(CallerTenant, scope, "file", "", "file", "x"); !errors.Is(err, ErrInvalidTenant) {
-		t.Errorf("Build(self) err = %v, want ErrInvalidTenant", err)
+	// Only the exact reserved token is accepted — no other non-UUID string, in a
+	// pattern any more than in a concrete CRN.
+	if _, err := ParsePattern(fmt.Sprintf("crn:%s:%s:file::file:x", "platform", scope)); !errors.Is(err, ErrInvalidTenant) {
+		t.Errorf("ParsePattern with unreserved token err = %v, want %v", err, ErrInvalidTenant)
 	}
 }
 

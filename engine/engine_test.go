@@ -138,6 +138,7 @@ func TestDecide_APIRequestSimulation(t *testing.T) {
 			req := engine.Request{
 				Action:   test.action,
 				Resource: mustResource(t, test.resource),
+				Tenant:   tenant,
 			}
 			got := engine.Decide([]policy.Policy{pol}, req)
 			t.Logf("Decide(%s on %s) = {Allowed:%v Reason:%q}", test.action, test.resource, got.Allowed, got.Reason)
@@ -157,7 +158,7 @@ func TestDecide_DenyWinsRegardlessOfOrder(t *testing.T) {
 			{Sid: "allow-second", Effect: policy.Allow, Actions: []string{"*"}, Resources: []string{crnPattern("datalake/**")}},
 		},
 	}
-	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x")}
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x"), Tenant: tenant}
 	if got := engine.Decide([]policy.Policy{pol}, req); got.Allowed {
 		t.Errorf("Decide = allowed, want deny (deny-wins); reason=%q", got.Reason)
 	}
@@ -173,7 +174,7 @@ func TestDecide_FailsClosedOnBadEffect(t *testing.T) {
 			Resources: []string{crnPattern("datalake/**")},
 		}},
 	}
-	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x")}
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x"), Tenant: tenant}
 	if got := engine.Decide([]policy.Policy{pol}, req); got.Allowed {
 		t.Errorf("Decide with bad effect = allowed, want deny (fail closed)")
 	}
@@ -188,7 +189,7 @@ func TestDecide_FailsClosedOnBadDenyPattern(t *testing.T) {
 			{Sid: "broken-deny", Effect: policy.Deny, Actions: []string{"*"}, Resources: []string{"not-a-valid-crn"}},
 		},
 	}
-	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x")}
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x"), Tenant: tenant}
 	if got := engine.Decide([]policy.Policy{pol}, req); got.Allowed {
 		t.Errorf("Decide with malformed deny pattern = allowed, want deny (fail closed)")
 	}
@@ -249,6 +250,7 @@ func TestDecide_RejectsNonConcreteRequestActions(t *testing.T) {
 		got := compiled.Decide(engine.Request{
 			Action:   action,
 			Resource: mustResource(t, "datalake/file.txt"),
+			Tenant:   tenant,
 		})
 		if got.Allowed {
 			t.Errorf("Decide action %q = allowed, want implicit deny", action)
@@ -269,6 +271,7 @@ func TestCompile_CopiesValidatedActions(t *testing.T) {
 	got := compiled.Decide(engine.Request{
 		Action:   "file:deleteFile",
 		Resource: mustResource(t, "datalake/file.txt"),
+		Tenant:   tenant,
 	})
 	if got.Allowed {
 		t.Error("compiled policy changed after the source action was mutated")
@@ -285,7 +288,7 @@ func TestDecide_MatchesActionAndResourceIndependently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: stateResource})
+	got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: stateResource, Tenant: tenant})
 	if !got.Allowed {
 		t.Errorf("cross-service action/resource request denied: %s", got.Reason)
 	}
@@ -302,7 +305,7 @@ func TestDecide_CrossTenantResourceNeverMatches(t *testing.T) {
 				Resources: []string{fmt.Sprintf("crn:%s:*:file::file:**", otherTenant)}},
 		},
 	}
-	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x")}
+	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/x"), Tenant: tenant}
 	if got := engine.Decide([]policy.Policy{pol}, req); got.Allowed {
 		t.Errorf("cross-tenant allow matched; want implicit deny, got %q", got.Reason)
 	}
@@ -319,49 +322,21 @@ func platformPolicy(statements ...policy.Statement) policy.Policy {
 	}
 }
 
-func TestDecide_PlatformPatternMatchesPlatformOwnedOnly(t *testing.T) {
-	// After the aic/self split, an "aic" pattern matches platform-owned rows
-	// only: it grants on a platform-owned resource but nothing on a tenant's
-	// own resource (the closed R3 cross-tenant hole).
+// The managed-policy case on the Decide path: one platform-issued document
+// carrying the token grants each consuming tenant its own resources, and no
+// other tenant's.
+func TestDecide_TokenMatchesCallerOnly(t *testing.T) {
 	pol := platformPolicy(policy.Statement{
-		Sid:       "aic-read-datalake",
+		Sid:       "read-datalake",
 		Effect:    policy.Allow,
 		Actions:   []string{"file:getFile"},
 		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/**", crn.PlatformTenant)},
 	})
 
-	platformRes, err := crn.Build(crn.PlatformTenant, owner, "file", "", "file", "datalake/reports/q1.csv")
-	if err != nil {
-		t.Fatalf("Build platform resource: %v", err)
-	}
-	got := engine.Decide([]policy.Policy{pol}, engine.Request{
-		Action: "file:getFile", Resource: platformRes, Tenant: tenant})
-	if !got.Allowed || got.Reason != "aic-read-datalake" {
-		t.Errorf("platform-owned = {Allowed:%v Reason:%q}, want allow via aic-read-datalake", got.Allowed, got.Reason)
-	}
-
-	// The caller's own resource is not granted by a platform-owned pattern.
-	got = engine.Decide([]policy.Policy{pol}, engine.Request{
-		Action: "file:getFile", Resource: mustResource(t, "datalake/reports/q1.csv"), Tenant: tenant})
-	if got.Allowed {
-		t.Errorf("aic pattern granted a tenant's own resource; want deny (R3), got %q", got.Reason)
-	}
-}
-
-func TestDecide_SelfPatternMatchesCallerOnly(t *testing.T) {
-	// A "self" pattern matches the caller's own resources (Request.Tenant) and
-	// refuses another tenant's resource — it is not an any-tenant wildcard.
-	pol := platformPolicy(policy.Statement{
-		Sid:       "self-read-datalake",
-		Effect:    policy.Allow,
-		Actions:   []string{"file:getFile"},
-		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/**", crn.CallerTenant)},
-	})
-
 	got := engine.Decide([]policy.Policy{pol}, engine.Request{
 		Action: "file:getFile", Resource: mustResource(t, "datalake/x"), Tenant: tenant})
-	if !got.Allowed || got.Reason != "self-read-datalake" {
-		t.Errorf("self on own resource = {Allowed:%v Reason:%q}, want allow via self-read-datalake", got.Allowed, got.Reason)
+	if !got.Allowed || got.Reason != "read-datalake" {
+		t.Errorf("own resource = {Allowed:%v Reason:%q}, want allow via read-datalake", got.Allowed, got.Reason)
 	}
 
 	otherRes, err := crn.Build("11111111-1111-1111-1111-111111111111", owner, "file", "", "file", "datalake/x")
@@ -371,18 +346,50 @@ func TestDecide_SelfPatternMatchesCallerOnly(t *testing.T) {
 	got = engine.Decide([]policy.Policy{pol}, engine.Request{
 		Action: "file:getFile", Resource: otherRes, Tenant: tenant})
 	if got.Allowed {
-		t.Errorf("self pattern matched another tenant's resource; want deny, got %q", got.Reason)
+		t.Errorf("token matched another tenant's resource; want deny, got %q", got.Reason)
+	}
+}
+
+// A pattern bound to a concrete tenant is dropped unless the request is for that
+// tenant, so a document naming another tenant grants nothing even when the
+// resource it names is the one being acted on. This is the invariant Constrain
+// applies when reducing to query constraints, enforced here too.
+func TestDecide_ForeignTenantPatternIsDropped(t *testing.T) {
+	const foreign = "11111111-1111-1111-1111-111111111111"
+	pol := platformPolicy(policy.Statement{
+		Sid:       "foreign-read",
+		Effect:    policy.Allow,
+		Actions:   []string{"file:getFile"},
+		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:**", foreign)},
+	})
+
+	foreignRes, err := crn.Build(foreign, owner, "file", "", "file", "datalake/x")
+	if err != nil {
+		t.Fatalf("Build other-tenant resource: %v", err)
+	}
+	got := engine.Decide([]policy.Policy{pol}, engine.Request{
+		Action: "file:getFile", Resource: foreignRes, Tenant: tenant})
+	if got.Allowed {
+		t.Errorf("a foreign-tenant pattern granted a foreign resource; want deny, got %q", got.Reason)
+	}
+
+	// The same document held by that tenant does grant it — the pattern is a
+	// deliberate grant, not an invalid one.
+	got = engine.Decide([]policy.Policy{pol}, engine.Request{
+		Action: "file:getFile", Resource: foreignRes, Tenant: foreign})
+	if !got.Allowed || got.Reason != "foreign-read" {
+		t.Errorf("own-tenant request = {Allowed:%v Reason:%q}, want allow via foreign-read", got.Allowed, got.Reason)
 	}
 }
 
 func TestDecide_PlatformGuardrailDenyWins(t *testing.T) {
 	// A platform-issued deny is a guardrail on the caller's own resources: it
-	// uses "self" so it overrides that tenant's own allow (deny-wins).
+	// carries the token, so it overrides that tenant's own allow (deny-wins).
 	guardrail := platformPolicy(policy.Statement{
-		Sid:       "aic-protect-secrets",
+		Sid:       "protect-secrets",
 		Effect:    policy.Deny,
 		Actions:   []string{"*"},
-		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/secret/**", crn.CallerTenant)},
+		Resources: []string{fmt.Sprintf("crn:%s:*:file::file:datalake/secret/**", crn.PlatformTenant)},
 	})
 	// The tenant policy allows the whole datalake and has no deny of its own.
 	tenantAllow := policy.Policy{
@@ -393,8 +400,8 @@ func TestDecide_PlatformGuardrailDenyWins(t *testing.T) {
 	}
 	req := engine.Request{Action: "file:getFile", Resource: mustResource(t, "datalake/secret/keys.txt"), Tenant: tenant}
 	got := engine.Decide([]policy.Policy{tenantAllow, guardrail}, req)
-	if got.Allowed || got.Reason != "aic-protect-secrets" {
-		t.Errorf("Decide = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)
+	if got.Allowed || got.Reason != "protect-secrets" {
+		t.Errorf("Decide = {Allowed:%v Reason:%q}, want deny via protect-secrets", got.Allowed, got.Reason)
 	}
 }
 
@@ -416,14 +423,14 @@ func TestDecide_ConditionGating(t *testing.T) {
 	}
 	res := mustResource(t, "datalake/x")
 
-	if got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res, Context: map[string]string{"mfa": "true"}}); !got.Allowed {
+	if got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res, Tenant: tenant, Context: map[string]string{"mfa": "true"}}); !got.Allowed {
 		t.Errorf("with mfa=true: got deny, want allow")
 	}
-	if got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res, Context: map[string]string{"mfa": "false"}}); got.Allowed {
+	if got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res, Tenant: tenant, Context: map[string]string{"mfa": "false"}}); got.Allowed {
 		t.Errorf("with mfa=false: got allow, want implicit deny")
 	}
 	// missing key: positive operator must not pass -> implicit deny
-	if got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res}); got.Allowed {
+	if got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res, Tenant: tenant}); got.Allowed {
 		t.Errorf("with mfa absent: got allow, want implicit deny")
 	}
 }
@@ -463,7 +470,7 @@ func TestDecide_ConditionOperators(t *testing.T) {
 				Sid: "s", Effect: policy.Allow, Actions: []string{"file:getFile"},
 				Resources: []string{crnPattern("datalake/**")}, Conditions: test.conds,
 			}}}
-			got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res, Context: test.ctx})
+			got := engine.Decide([]policy.Policy{pol}, engine.Request{Action: "file:getFile", Resource: res, Tenant: tenant, Context: test.ctx})
 			if got.Allowed != test.want {
 				t.Errorf("Decide allowed = %v, want %v", got.Allowed, test.want)
 			}
@@ -486,7 +493,7 @@ func TestDecide_ResourcePathSegmentCondition(t *testing.T) {
 
 	decide := func(path string, ctx map[string]string) engine.Decision {
 		return engine.Decide([]policy.Policy{pol},
-			engine.Request{Action: "file:getFile", Resource: mustResource(t, path), Context: ctx})
+			engine.Request{Action: "file:getFile", Resource: mustResource(t, path), Tenant: tenant, Context: ctx})
 	}
 
 	if got := decide("files/inbound/123456789/report.csv", nil); !got.Allowed {
@@ -521,7 +528,7 @@ func TestDecide_ResourcePathSegmentIfExists(t *testing.T) {
 	}}}
 	decide := func(path string) engine.Decision {
 		return engine.Decide([]policy.Policy{pol},
-			engine.Request{Action: "file:getFile", Resource: mustResource(t, path)})
+			engine.Request{Action: "file:getFile", Resource: mustResource(t, path), Tenant: tenant})
 	}
 	if got := decide("files/inbound"); !got.Allowed {
 		t.Errorf("segment absent: got deny (%q), want allow (IfExists)", got.Reason)

@@ -527,14 +527,15 @@ func TestWhere_PathSegmentConditionMappedToColumn(t *testing.T) {
 	}
 }
 
-// datasets is a PublicRows table: its platform-published rows are readable by
-// every principal holding the action, so no policy has to name them.
+// datasets is the read mapping of a table the platform publishes rows into. The
+// marker is declared here rather than fixed by the package so it can be qualified
+// once a query aliases or joins the table.
 func datasets() sqlfilter.Mapping {
 	return sqlfilter.Mapping{
-		Service:    "config",
-		Tenant:     "tenant_id",
-		PublicRows: true,
-		Scope:      "owner_id",
+		Service:   "config",
+		Tenant:    "tenant_id",
+		Published: sqlfilter.Published{Column: "issuer", Value: "public"},
+		Scope:     "owner_id",
 		Fixed: map[sqlfilter.Segment]string{
 			sqlfilter.SegmentRegion: "",
 			sqlfilter.SegmentType:   "dataset",
@@ -543,10 +544,11 @@ func datasets() sqlfilter.Mapping {
 	}
 }
 
-// PublicRows widens an existing grant; it does not create one. Without an
-// applicable allow for the action the clause stays closed, so a principal with
-// no grant on the table sees no platform rows either.
-func TestWhere_PublicRowsStayClosedWithoutAGrant(t *testing.T) {
+// Publication widens an existing grant; it does not create one. Without an
+// applicable allow for the action the clause stays closed, so a principal holding
+// no grant on the table reads no published rows either — the service answers 403
+// rather than serving the catalog to anyone authenticated.
+func TestWhere_PublishedStaysClosedWithoutAGrant(t *testing.T) {
 	pol := policy.Policy{
 		ID: "other-action",
 		Statements: []policy.Statement{
@@ -568,14 +570,15 @@ func TestWhere_PublicRowsStayClosedWithoutAGrant(t *testing.T) {
 	}
 }
 
-// A principal whose only grant for the action is the platform's bound public
-// policy holds the action, so it reads the published rows and nothing else.
-func TestWhere_PublicGrantAloneSelectsPublicRows(t *testing.T) {
+// The managed-policy case: one stored document carrying the tenant token, bound by
+// this tenant, selects this tenant's rows and — because the table publishes — the
+// platform's published ones, from a single statement that names neither.
+func TestWhere_TokenResolvesToTheCallerAndWidens(t *testing.T) {
 	pol := policy.Policy{
-		ID: "platform-public-datasets",
+		ID: "ConfigFullAccess",
 		Statements: []policy.Statement{
-			{Sid: "public", Effect: policy.Allow, Actions: []string{"config:listDataset"},
-				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:*", crn.PlatformTenant)}},
+			{Sid: "managed", Effect: policy.Allow, Actions: []string{"config:*"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::*:**", crn.PlatformTenant)}},
 		},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "config:listDataset", tenant, nil)
@@ -584,84 +587,60 @@ func TestWhere_PublicGrantAloneSelectsPublicRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Where: %v", err)
 	}
-	if sql != "issuer = 'public'" {
-		t.Errorf("sql = %q, want \"issuer = 'public'\"", sql)
-	}
-	if args != nil {
-		t.Errorf("args = %#v, want none", args)
-	}
-}
-
-// The platform can withdraw one of its published rows from a tenant: an "aic"
-// deny emits the same marker predicate and is subtracted from the widened allow.
-func TestWhere_PublicRowsSubtractedByPlatformDeny(t *testing.T) {
-	const secretID = "22222222-2222-2222-2222-222222222222"
-	pol := policy.Policy{
-		ID: "tenant-wide",
-		Statements: []policy.Statement{
-			{Sid: "all-own", Effect: policy.Allow, Actions: []string{"config:listDataset"},
-				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:*", tenant)}},
-			{Sid: "not-that-public-one", Effect: policy.Deny, Actions: []string{"config:listDataset"},
-				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:%s", crn.PlatformTenant, secretID)}},
-		},
-	}
-	c := engine.Constrain([]policy.Policy{pol}, "config:listDataset", tenant, nil)
-
-	sql, args, err := sqlfilter.Where(c, datasets())
-	if err != nil {
-		t.Fatalf("Where: %v", err)
-	}
-	wantSQL := "((tenant_id = ?) OR issuer = 'public') " +
-		"AND ((issuer = 'public' AND id = ?) IS NOT TRUE)"
+	wantSQL := "(tenant_id = ?) OR issuer = ?"
 	if sql != wantSQL {
-		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
 	}
-	if !reflect.DeepEqual(args, []any{tenant, secretID}) {
-		t.Errorf("args = %#v, want [tenant secretID]", args)
+	if !reflect.DeepEqual(args, []any{tenant, "public"}) {
+		t.Errorf("args = %#v, want [tenant public]", args)
 	}
 }
 
-// A platform-published ("aic") pattern is admitted only by a mapping that
-// declares PublicRows. On any other mapping — a write filter, above all — it
-// selects nothing, so no policy can reach platform rows through the one pattern
-// shape that would otherwise bypass the tenant column.
-func TestWhere_PlatformPatternNeedsPublicRows(t *testing.T) {
+// A write mapping leaves Published unset, and that is the whole of the write-side
+// protection: every pattern is bound to the caller through the tenant column, and
+// a published row belongs to the platform, so no policy shape reaches it. The
+// platform edits its own published rows because it owns them.
+func TestWhere_WriteMappingCannotReachPublishedRows(t *testing.T) {
 	pol := policy.Policy{
-		ID: "aic-managed",
+		ID: "ConfigFullAccess",
 		Statements: []policy.Statement{
-			{Sid: "aic-write", Effect: policy.Allow, Actions: []string{"config:updateDataset"},
+			{Sid: "managed", Effect: policy.Allow, Actions: []string{"config:*"},
 				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:*", crn.PlatformTenant)}},
 		},
 	}
 	c := engine.Constrain([]policy.Policy{pol}, "config:updateDataset", tenant, nil)
 
 	writes := datasets()
-	writes.PublicRows = false
+	writes.Published = sqlfilter.Published{}
 
 	sql, args, err := sqlfilter.Where(c, writes)
 	if err != nil {
 		t.Fatalf("Where: %v", err)
 	}
-	if !sqlfilter.IsClosed(sql) {
-		t.Errorf("sql = %q, want the closed clause", sql)
+	if sql != "tenant_id = ?" {
+		t.Errorf("sql = %q, want %q", sql, "tenant_id = ?")
 	}
-	if args != nil {
-		t.Errorf("args = %#v, want none", args)
+	if !reflect.DeepEqual(args, []any{tenant}) {
+		t.Errorf("args = %#v, want [tenant]", args)
 	}
 }
 
-// On a PublicRows mapping the caller's own grant and the platform's rows form a
-// union, and the filters inside the caller's grant — here an id and a residual
-// condition — narrow only the caller's group. The platform's rows arrive through
-// the marker, so they are never narrowed by them.
-func TestWhere_PublicRowsUnionWithCallerGrant(t *testing.T) {
+// Published rows are all-or-nothing: they are not subject to the narrowing inside
+// the caller's own grant, and a deny cannot subtract them either, because every
+// deny group is bound to the caller's tenant and a published row is the
+// platform's. Withholding the catalog from a principal means withholding the
+// action, not writing a deny.
+func TestWhere_PublishedRowsSurviveOwnGrantNarrowingAndDenies(t *testing.T) {
 	const ownID = "11111111-1111-1111-1111-111111111111"
+	const otherID = "22222222-2222-2222-2222-222222222222"
 	pol := policy.Policy{
 		ID: "own",
 		Statements: []policy.Statement{
 			{Sid: "own", Effect: policy.Allow, Actions: []string{"config:listDataset"},
 				Resources:  []string{fmt.Sprintf("crn:%s:*:config::dataset:%s", tenant, ownID)},
 				Conditions: policy.Conditions{conditionoperator.StringEquals: {"status": {"active"}}}},
+			{Sid: "not-that-one", Effect: policy.Deny, Actions: []string{"config:listDataset"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:%s", tenant, otherID)}},
 		},
 	}
 	// status is a resource attribute (absent from context) -> stays residual.
@@ -675,12 +654,40 @@ func TestWhere_PublicRowsUnionWithCallerGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Where: %v", err)
 	}
-	wantSQL := "(tenant_id = ? AND id = ? AND status = ?) OR issuer = 'public'"
+	// The id, the residual condition and the deny all carry tenant_id, so none of
+	// them can touch a row the marker admits.
+	wantSQL := "((tenant_id = ? AND id = ? AND status = ?) OR issuer = ?) " +
+		"AND ((tenant_id = ? AND id = ?) IS NOT TRUE)"
 	if sql != wantSQL {
 		t.Errorf("sql =\n  %q\nwant\n  %q", sql, wantSQL)
 	}
-	if !reflect.DeepEqual(args, []any{tenant, ownID, "active"}) {
-		t.Errorf("args = %#v, want [tenant ownID active]", args)
+	if !reflect.DeepEqual(args, []any{tenant, ownID, "active", "public", tenant, otherID}) {
+		t.Errorf("args = %#v, want [tenant ownID active public tenant otherID]", args)
+	}
+}
+
+// The marker column is emitted verbatim, so a mapping for an aliased or joined
+// query qualifies it and the clause stays unambiguous.
+func TestWhere_PublishedColumnIsQualifiable(t *testing.T) {
+	pol := policy.Policy{
+		ID: "own",
+		Statements: []policy.Statement{
+			{Sid: "own", Effect: policy.Allow, Actions: []string{"config:listDataset"},
+				Resources: []string{fmt.Sprintf("crn:%s:*:config::dataset:*", tenant)}},
+		},
+	}
+	c := engine.Constrain([]policy.Policy{pol}, "config:listDataset", tenant, nil)
+
+	m := datasets()
+	m.Tenant = "d.tenant_id"
+	m.Published = sqlfilter.Published{Column: "d.issuer", Value: "public"}
+
+	sql, _, err := sqlfilter.Where(c, m)
+	if err != nil {
+		t.Fatalf("Where: %v", err)
+	}
+	if sql != "(d.tenant_id = ?) OR d.issuer = ?" {
+		t.Errorf("sql = %q", sql)
 	}
 }
 
@@ -774,8 +781,10 @@ func TestWhere_FixedSegments(t *testing.T) {
 
 // A projection whose tenant scoping is enforced outside the filter can declare
 // TenantAnswered — the escape hatch — so no tenant predicate is emitted, while
-// the service applies its own row-visibility clause. (Prefer the default
-// issuer = 'public' handling for ordinary platform-published tables.)
+// the service applies its own row-visibility clause. (Prefer Published for an
+// ordinary table the platform publishes rows into: with no tenant predicate a
+// deny can reach published rows, which the marker's all-or-nothing rule does not
+// intend.)
 func TestWhere_TenantAnswered(t *testing.T) {
 	catalog := sqlfilter.Mapping{
 		Service:        "iam",

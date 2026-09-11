@@ -12,12 +12,21 @@ import (
 type Request struct {
 	Action   string // concrete "{service}:{operation}"
 	Resource crn.CRN
-	// Tenant is the requesting (caller's) tenant. It is matched by CallerTenant
-	// ("self") patterns and is distinct from Resource.Tenant, which is the tenant
-	// that owns the resource being acted on. Leave it empty only when no policy
-	// uses "self"; a "self" pattern against a mismatched Tenant denies.
-	Tenant  string
-	Context map[string]string // attributes the service supplies for conditions
+	// Tenant is the requesting (caller's) tenant, taken from the verified claims.
+	// It is what the PlatformTenant token resolves to, and it bounds every
+	// pattern: a pattern naming any other tenant cannot match. It is distinct
+	// from Resource.Tenant, the tenant owning the resource being acted on, and it
+	// is required — an empty Tenant matches no resource.
+	Tenant string
+	// ResourcePublished reports that the resource carries the platform's published
+	// marker, which the service reads off the row (see sqlfilter.Published). The
+	// platform published it for every tenant, so an allow need not name it: this
+	// widens an allow the caller already holds for the action, exactly as the
+	// query filter ORs the marker onto an existing allow clause. It never widens a
+	// deny and never creates a grant. Leave it false on write actions, so a
+	// published row is writable only by the tenant that owns it.
+	ResourcePublished bool
+	Context           map[string]string // attributes the service supplies for conditions
 }
 
 type Decision struct {
@@ -148,13 +157,38 @@ func (c Compiled) Decide(r Request) Decision {
 }
 
 func (s compiledStatement) applies(r Request) bool {
-	return actionMatches(s.actions, r.Action) &&
-		s.matchesResource(r.Resource, r.Tenant) &&
-		evalConditions(s.conditions, r.Context, strings.Split(r.Resource.Resource, "/"))
+	if !actionMatches(s.actions, r.Action) {
+		return false
+	}
+	if !evalConditions(s.conditions, r.Context, strings.Split(r.Resource.Resource, "/")) {
+		return false
+	}
+	// A published resource is readable by every principal holding the action, so an
+	// allow does not have to name it. The action check above still stands, so this
+	// widens a grant and never creates one, and it deliberately does not apply to a
+	// deny — the marker is all-or-nothing, and withholding published rows means
+	// withholding the action.
+	if r.ResourcePublished && s.effect == policy.Allow {
+		return true
+	}
+	return s.matchesResource(r.Resource, r.Tenant)
 }
 
+// matchesResource reports whether any of the statement's patterns covers the
+// requested resource.
+//
+// A pattern bound to a concrete tenant other than the requesting one is skipped
+// before matching, the same rule Constrain applies when it reduces a policy to
+// query constraints. Both paths therefore share one invariant: a policy can only
+// ever reach resources of the tenant the request is made for. Without it a
+// document naming another tenant would grant that tenant's resources to whoever
+// held the document, so the check must not depend on which tenant the resource
+// happens to belong to.
 func (s compiledStatement) matchesResource(c crn.CRN, requestTenant string) bool {
 	for _, pat := range s.patterns {
+		if pat.Tenant() != crn.PlatformTenant && pat.Tenant() != requestTenant {
+			continue
+		}
 		if pat.Matches(c, requestTenant) {
 			return true
 		}
@@ -240,11 +274,10 @@ func Constrain(policies []policy.Policy, action, tenant string, context map[stri
 // service names are independent.
 //
 // tenant must be the trusted, concrete tenant UUID for the list/query. Patterns
-// are matched against it exactly as Decide would: a concrete pattern naming
-// another tenant is dropped, a CallerTenant ("self") pattern is rewritten to
-// this tenant, and a PlatformTenant ("aic") pattern is kept unrewritten so the
-// adapter can bind it to the table's platform-owned id. The adapter never
-// interprets policy.
+// are matched against it exactly as Decide would: a PlatformTenant token is
+// resolved to this tenant, and a concrete pattern naming another tenant is
+// dropped. Adapters therefore only ever see a concrete tenant equal to this one,
+// and never interpret policy.
 //
 // context supplies the principal/request attributes known at list time.
 // Keys present in context are resolved immediately; a failing condition drops
@@ -267,9 +300,8 @@ func (c Compiled) Constrain(action, tenant string, context map[string]string) Co
 		for _, pat := range s.patterns {
 			switch pat.Tenant() {
 			case tenant: // concrete UUID equal to the request tenant → keep
-			case crn.CallerTenant: // "self" → rewrite to the request tenant
+			case crn.PlatformTenant: // the token → resolve to the request tenant
 				pat = pat.WithTenant(tenant)
-			case crn.PlatformTenant: // "aic" → platform-owned; keep unrewritten for the adapter
 			default:
 				continue // another tenant: can never match this request
 			}

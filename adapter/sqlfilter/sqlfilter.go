@@ -28,22 +28,27 @@ import (
 
 const closedClause = "1=0"
 
-// PlatformIssuerColumn and PlatformIssuerPublic are the fixed column and value
-// that mark platform-published rows in every platform-published table. They are
-// the single source of truth for the trust invariant behind the "aic" pattern:
-// the read filter authorizes such a row to every principal solely because it
-// carries this marker, so each service's write path MUST reject any attempt by a
-// non-platform tenant to set PlatformIssuerColumn to PlatformIssuerPublic.
-// Services should reference these constants in that guard (and its tests) so the
-// write check cannot drift from the read filter. See docs/iam-policy-contract.md.
-const (
-	PlatformIssuerColumn = "issuer"
-	PlatformIssuerPublic = "public"
-)
+// Published names the column and value marking rows the platform published for
+// every tenant to read. Publication is the grant: a marked row is readable by
+// anyone already holding the action, so no policy names it and the marker is
+// all-or-nothing. Selective sharing must not use it.
+//
+// The column is per-table so it can be qualified, which matters as soon as a
+// query aliases or joins the table.
+//
+// Trust invariant: the read filter authorizes a marked row to every principal
+// solely because it carries the marker, so each service's write path MUST reject
+// any attempt by a non-platform tenant to set it. See docs/iam-policy-contract.md.
+type Published struct {
+	Column string
+	Value  string
+}
 
-// platformOwnedPredicate is the SQL predicate emitted for an "aic" pattern,
-// derived from the exported marker so the two cannot diverge.
-const platformOwnedPredicate = PlatformIssuerColumn + " = '" + PlatformIssuerPublic + "'"
+func (p Published) set() bool { return p.Column != "" }
+
+func (p Published) predicate() (string, []any) {
+	return p.Column + " = ?", []any{p.Value}
+}
 
 var (
 	// ErrServiceRequired is returned when Mapping.Service is empty.
@@ -96,29 +101,23 @@ type ResourceColumn struct {
 // for another service are omitted; wildcard-service patterns remain applicable.
 //
 // Tenant is the owning-tenant column and is required unless TenantAnswered
-// declares that scoping is enforced outside the filter; setting both fails. A
-// concrete or "self" pattern emits Tenant = ?; a pattern bound to
-// crn.PlatformTenant ("aic") names platform-published rows, which every table
-// marks with the fixed convention issuer = 'public' — the adapter emits that
-// predicate directly, so no per-table configuration is required. Such a pattern
-// requires PublicRows: without it the mapping has not declared the marker
-// readable, and the pattern selects nothing rather than reaching rows the tenant
-// column would otherwise exclude.
+// declares that scoping is enforced outside the filter; setting both fails. Every
+// pattern engine.Constrain emits carries the request tenant, so the adapter always
+// emits Tenant = ?.
 //
-// TenantAnswered declares the tenant predicate is enforced outside the filter,
-// so no tenant predicate is emitted for either a concrete or a platform pattern.
-// It requires independent proof that every retained match applies to the table
-// projection, and the caller must still enforce the table's own visibility
-// predicate.
+// TenantAnswered declares the tenant predicate is enforced outside the filter, so
+// none is emitted. It requires independent proof that every retained match applies
+// to the table projection, and the caller must still enforce the table's own
+// visibility predicate.
 //
-// PublicRows declares the table's platform-published rows readable by every
-// principal that holds the action, so the filter ORs issuer = 'public' onto the
-// allow clause instead of requiring a pattern to name them. It widens only what
-// an existing grant already opened: with no applicable allow the clause stays
-// closed, and denies still subtract. It is also what admits an "aic" pattern at
-// all, so a mapping used for writes leaves it off and no policy — however it
-// names those rows — can reach them; the owning tenant still writes its own rows
-// through the tenant column. The trust invariant below applies.
+// Published, when set, declares the table's platform-published rows readable by
+// every principal that holds the action, so the filter ORs the marker onto the
+// allow clause instead of requiring a pattern to name them. It widens only what an
+// existing grant already opened: with no applicable allow the clause stays closed,
+// and denies still subtract. Set it on read mappings only. A write mapping leaves
+// it off, and then no policy can reach a published row, because the tenant column
+// binds every pattern to the caller — the platform still writes its own rows
+// because it owns them. The trust invariant on Published applies.
 //
 // Scope, Region and Type are columns for segments that vary per row. A column
 // may be empty when applicable patterns use the wildcard or Fixed declares the
@@ -136,7 +135,7 @@ type Mapping struct {
 	Service                   string
 	Tenant                    string
 	TenantAnswered            bool
-	PublicRows                bool
+	Published                 Published
 	Scope                     string
 	Region                    string
 	Type                      string
@@ -163,37 +162,25 @@ func Where(c engine.Constraints, m Mapping) (string, []any, error) {
 	if m.Tenant != "" && m.TenantAnswered {
 		return "", nil, ErrTenantConflict
 	}
-	// On a PublicRows table an allow pattern bound to the platform tenant selects
-	// nothing the marker below does not already select, so it is kept out of the
-	// clause and only remembered as a grant on the table. Denies keep theirs: an
-	// "aic" deny is how the platform withdraws one published row.
-	allows, publicGrant := c.Allow, false
-	if m.PublicRows {
-		allows = make([]engine.ResourceMatch, 0, len(c.Allow))
-		for _, a := range c.Allow {
-			if a.Pattern.Tenant() == crn.PlatformTenant {
-				publicGrant = true
-				continue
-			}
-			allows = append(allows, a)
-		}
-	}
-	allowSQL, allowArgs, err := orGroups(allows, m)
+	allowSQL, allowArgs, err := orGroups(c.Allow, m)
 	if err != nil {
 		return "", nil, err
 	}
-	if allowSQL == "" && !publicGrant {
+	// Publication widens a grant; it never creates one. Without an applicable
+	// allow the caller does not hold the action over this table at all, and the
+	// answer is no rows rather than the published ones.
+	if allowSQL == "" {
 		return closedClause, nil, nil
 	}
-	// A grant over any row of a PublicRows table also opens its platform-published
-	// rows. The OR sits inside the allow clause, so a pattern that narrows the
-	// caller's own rows by id, owner or condition cannot narrow these away, and
-	// the deny composition below still subtracts them.
-	switch {
-	case allowSQL == "":
-		allowSQL, allowArgs = platformOwnedPredicate, nil
-	case m.PublicRows:
-		allowSQL = "(" + allowSQL + ") OR " + platformOwnedPredicate
+	// A grant over any row of a table with published rows also opens them. The OR
+	// sits inside the allow clause, so a pattern that narrows the caller's own rows
+	// by id, owner or condition cannot narrow these away — a narrowing meant to
+	// cover published rows too belongs in a deny — and the deny composition below
+	// still subtracts them.
+	if m.Published.set() {
+		pub, pubArgs := m.Published.predicate()
+		allowSQL = "(" + allowSQL + ") OR " + pub
+		allowArgs = append(allowArgs, pubArgs...)
 	}
 	denySQL, denyArgs, err := orGroups(c.Deny, m)
 	if err != nil {
@@ -274,26 +261,13 @@ func group(rm engine.ResourceMatch, m Mapping) (string, []any, bool, error) {
 		}
 	}
 
-	// Tenant is always constrained (never a wildcard); engine.Constrain has
-	// already resolved a "self" placeholder to the concrete request tenant. A
-	// PlatformTenant ("aic") pattern names platform-published rows, marked by the
-	// fixed issuer = 'public' convention. With TenantAnswered the service enforces
+	// Tenant is always constrained (never a wildcard) and always concrete:
+	// engine.Constrain has resolved the token to the request tenant and dropped
+	// every pattern naming another one. With TenantAnswered the service enforces
 	// tenant scoping itself (see Mapping).
 	if !m.TenantAnswered {
-		if p.Tenant() == crn.PlatformTenant {
-			// The marker is a read-only concept: it authorizes a row to every
-			// principal, so honouring it on a mapping that has not declared
-			// PublicRows would let one pattern shape slip past the tenant column the
-			// mapping binds — a write filter would match platform-published rows.
-			// Such a pattern selects nothing here, as one for another tenant does.
-			if !m.PublicRows {
-				return "", nil, false, nil
-			}
-			preds = append(preds, platformOwnedPredicate)
-		} else {
-			preds = append(preds, m.Tenant+" = ?")
-			args = append(args, p.Tenant())
-		}
+		preds = append(preds, m.Tenant+" = ?")
+		args = append(args, p.Tenant())
 	}
 
 	for _, f := range fields {

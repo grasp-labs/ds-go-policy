@@ -7,24 +7,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// PlatformTenant is the reserved token accepted in the tenant field. It names
-// platform-owned resources in both positions: in a concrete CRN it is a
-// platform-owned resource; in a Pattern it matches only platform-owned rows
-// (resources whose tenant is itself PlatformTenant), which is what lets a
-// single platform-issued document grant every tenant access to a shared,
-// platform-published table. It is never rewritten to the requesting tenant —
-// use CallerTenant for that.
+// PlatformTenant is the one reserved token accepted in the tenant field of a
+// Pattern, where it stands for the requesting tenant: it matches resources whose
+// tenant equals the caller's, and the engine resolves it to the concrete request
+// tenant when emitting constraints. This is what lets the platform issue a single
+// document that every tenant binds to its own groups and that grants each of them
+// access to their own resources.
+//
+// It is valid in a Pattern only. A concrete CRN names a real resource identity,
+// whose tenant is always a real tenant — platform-published rows are owned by the
+// platform tenant like any other row, and their readability by everyone is a
+// marker on the row, not a tenant identity (see the sqlfilter adapter).
+//
+// The engine evaluates whatever documents it is given; restricting who may author
+// patterns under this token is the responsibility of the policy management plane
+// that issues and binds policies.
 const PlatformTenant = "aic"
-
-// CallerTenant is the reserved token that, in a Pattern, stands for the
-// requesting tenant: it matches resources whose tenant equals the caller's, and
-// the engine rewrites it to the concrete request tenant when emitting
-// constraints. It is only valid in a Pattern — a concrete CRN names a real
-// resource identity, which can never be "self". The engine evaluates whatever
-// documents it is given; restricting who may author patterns under these tokens
-// is the responsibility of the policy management plane that issues and binds
-// policies.
-const CallerTenant = "self"
 
 // CRN is a resource identity
 type CRN struct {
@@ -37,16 +35,16 @@ type CRN struct {
 	Resource string
 }
 
-// Parse parses a concrete CRN from a string. The CallerTenant token ("self") is
-// rejected here — a concrete CRN is a real resource identity. Use ParsePattern
-// to accept "self" in a resource pattern.
+// Parse parses a concrete CRN from a string. The PlatformTenant token is
+// rejected here — a concrete CRN is a real resource identity, and the token
+// stands for the caller. Use ParsePattern to accept it in a resource pattern.
 func Parse(s string) (CRN, error) {
 	return parse(s, false)
 }
 
-// parse is the shared CRN parser. allowCaller permits the CallerTenant token in
+// parse is the shared CRN parser. allowToken permits the PlatformTenant token in
 // the tenant field; it is true only when parsing a Pattern.
-func parse(s string, allowCaller bool) (CRN, error) {
+func parse(s string, allowToken bool) (CRN, error) {
 	// SplitN with limit 7 keeps any ":" in the resource (S3-style keys may
 	// contain colons); the first five fields are guaranteed colon-free.
 	parts := strings.SplitN(s, ":", 7)
@@ -66,7 +64,7 @@ func parse(s string, allowCaller bool) (CRN, error) {
 			Input:  s,
 		}
 	}
-	tenant, err := normalizeTenant(parts[1], allowCaller)
+	tenant, err := normalizeTenant(parts[1], allowToken)
 	if err != nil {
 		return CRN{}, &ParseError{Kind: ErrInvalidTenant, Field: "tenant", Value: parts[1], Input: s}
 	}
@@ -89,18 +87,15 @@ func parse(s string, allowCaller bool) (CRN, error) {
 	}, nil
 }
 
-// normalizeTenant validates the tenant field: a UUID (canonicalized), the
-// reserved PlatformTenant token, or — only when allowCaller is set (a Pattern)
-// — the CallerTenant token. Anything else is rejected: the tenant is the
-// isolation boundary and must never be a free-form string or a wildcard, and
-// "self" is meaningless outside a pattern.
-func normalizeTenant(tenant string, allowCaller bool) (string, error) {
+// normalizeTenant validates the tenant field: a UUID (canonicalized), or — only
+// when allowToken is set (a Pattern) — the reserved PlatformTenant token.
+// Anything else is rejected: the tenant is the isolation boundary and must never
+// be a free-form string or a wildcard, and the token is meaningless outside a
+// pattern.
+func normalizeTenant(tenant string, allowToken bool) (string, error) {
 	if tenant == PlatformTenant {
-		return tenant, nil
-	}
-	if tenant == CallerTenant {
-		if !allowCaller {
-			return "", errSelfInConcreteCRN
+		if !allowToken {
+			return "", errTokenInConcreteCRN
 		}
 		return tenant, nil
 	}
@@ -154,17 +149,16 @@ const (
 )
 
 // Pattern is a CRN that may contain * (single segment) and ** (recursive, path-addressed).
-// Tenant is never a wildcard — it is a concrete UUID (tenant isolation), the
-// reserved PlatformTenant token (platform-owned rows), or the reserved
-// CallerTenant token (the requesting tenant, resolved by the engine).
+// Tenant is never a wildcard — it is a concrete UUID (a deliberate grant over that
+// tenant) or the reserved PlatformTenant token (the requesting tenant, resolved by
+// the engine).
 type Pattern struct {
 	crn CRN // Scope/Service/Region/Type may be "*"; Resource may contain "*" and "**"
 }
 
 // Field accessors expose the (possibly wildcarded) pattern segments so adapters
-// can translate a Pattern into a storage filter. Tenant is a concrete UUID, the
-// reserved PlatformTenant token, or (before the engine resolves it) the
-// CallerTenant token.
+// can translate a Pattern into a storage filter. Tenant is a concrete UUID, or —
+// before the engine resolves it — the reserved PlatformTenant token.
 func (p Pattern) Tenant() string   { return p.crn.Tenant }
 func (p Pattern) Scope() string    { return p.crn.Scope }
 func (p Pattern) Service() string  { return p.crn.Service }
@@ -176,9 +170,8 @@ func (p Pattern) Resource() string { return p.crn.Resource }
 func (p Pattern) String() string { return p.crn.String() }
 
 // WithTenant returns a copy of the pattern with its tenant replaced. The engine
-// uses it to resolve the CallerTenant placeholder to the requesting tenant when
-// emitting constraints, so adapters only ever see a concrete tenant or the
-// PlatformTenant token (which the adapter binds to a platform-owned id).
+// uses it to resolve the PlatformTenant placeholder to the requesting tenant when
+// emitting constraints, so adapters only ever see a concrete tenant.
 func (p Pattern) WithTenant(tenant string) Pattern {
 	p.crn.Tenant = tenant
 	return p
@@ -186,7 +179,7 @@ func (p Pattern) WithTenant(tenant string) Pattern {
 
 func ParsePattern(s string) (Pattern, error) {
 	// A pattern reuses the concrete-CRN structural checks but additionally
-	// accepts the CallerTenant token in the tenant field.
+	// accepts the PlatformTenant token in the tenant field.
 	c, err := parse(s, true)
 	if err != nil {
 		return Pattern{}, err
@@ -217,13 +210,16 @@ func (p Pattern) Matches(c CRN, requestTenant string) bool {
 		matchPath(strings.Split(p.crn.Resource, "/"), strings.Split(c.Resource, "/"))
 }
 
-// matchTenant resolves the tenant field. The CallerTenant token ("self") matches
-// the resource whose tenant equals the requesting tenant; every other value —
-// a concrete UUID or the PlatformTenant token — is an exact match, so an "aic"
-// pattern matches platform-owned rows only and a UUID pattern only its own
-// tenant. "*" is never valid here: the tenant is the isolation boundary.
+// matchTenant resolves the tenant field. The PlatformTenant token matches the
+// resource whose tenant equals the requesting tenant; a concrete UUID is an exact
+// match against the resource's tenant. "*" is never valid here: the tenant is the
+// isolation boundary.
+//
+// A concrete UUID naming a tenant other than the caller's is a deliberate
+// cross-tenant grant. Whether the caller may hold one is not decided here — the
+// engine drops such patterns unless the request is for that tenant.
 func matchTenant(pat, val, requestTenant string) bool {
-	if pat == CallerTenant {
+	if pat == PlatformTenant {
 		return val == requestTenant
 	}
 	return pat == val

@@ -1,16 +1,16 @@
 {
-  "id": "aic-managed-guardrail",
+  "id": "platform-guardrail",
   "name": "Platform guardrail",
   "version": "1.0.0",
   "statements": [
     {
-      "sid": "aic-protect-secrets",
+      "sid": "protect-secrets",
       "effect": "deny",
       "actions": [
         "*"
       ],
       "resources": [
-        "crn:self:*:file::file:**/secrets/**"
+        "crn:aic:*:file::file:**/secrets/**"
       ]
     }
   ]

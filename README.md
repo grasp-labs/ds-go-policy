@@ -198,24 +198,24 @@ if err != nil {
 // crn:{tenant}::iam::role:*      ->  selects nothing here (it's the roles table's grant)
 ```
 
-A platform-published table (a managed catalog like `dataset`) holds rows the
-platform owns. Only the platform tenant may publish them, and by convention every
-such table marks them with `issuer = 'public'`. `PublicRows` declares that a
-mapping reads such a table: its published rows are then readable by every
-principal that already holds the action, so no policy has to name them.
+A published table (a managed catalog like `dataset`) holds rows the platform owns
+and has published for every tenant to read. Only the platform tenant may set the
+marker. `Published` declares the marker's column and value on a read mapping, and
+those rows are then readable by every principal that already holds the action — no
+policy names them, because publication *is* the grant.
 
-Requiring every policy to carry an `aic` statement instead would be a footgun —
-a tenant whose only grant pins one of its own datasets would silently lose the
-published rows, because that pattern narrows to a single id:
+Expressing it in policy instead would be a footgun: a tenant whose only grant pins
+one of its own datasets would silently lose the published rows, since that pattern
+narrows to a single id.
 
 ```go
-// cons: allow config:listDataset on crn:self:*:config::dataset:*, owner_id = ownerA
+// cons: allow config:listDataset on crn:aic:*:config::dataset:*, owner_id = ownerA
 cons := engine.Constrain(policies, "config:listDataset", tenantID, nil)
 
 where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
-	Service:    "config",
-	Tenant:     "dataset.tenant_id",
-	PublicRows: true,
+	Service:   "config",
+	Tenant:    "dataset.tenant_id",
+	Published: sqlfilter.Published{Column: "dataset.issuer", Value: "public"},
 	Fixed: map[sqlfilter.Segment]string{
 		sqlfilter.SegmentScope:  "",
 		sqlfilter.SegmentRegion: "",
@@ -230,27 +230,32 @@ where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
 if err != nil {
 	return err
 }
-// where: (dataset.tenant_id = ? AND dataset.owner_id = ?) OR issuer = 'public'
-// args:  [tenantID, "ownerA"]
+// where: (dataset.tenant_id = ? AND dataset.owner_id = ?) OR dataset.issuer = ?
+// args:  [tenantID, "ownerA", "public"]
 ```
 
-The caller's `owner_id`/`id`/`status` filters live only inside their own group, so
-the published rows are never narrowed by them (this matters on list endpoints).
-The flag widens an existing grant and never creates one: with no applicable allow
-for the action the clause is still `1=0`, and a platform-issued (`aic`) deny still
-subtracts published rows — that is how the platform withdraws one of them.
+The column is configured per table rather than fixed by the package so it can be
+qualified, as above, for a query that aliases or joins.
 
-`PublicRows` is also what admits an `aic` pattern at all. It is the one pattern
-shape that does not bind the tenant column — it emits the fixed `issuer = 'public'`
-predicate instead — so a mapping without the flag drops it, the way it drops a
-pattern for another tenant or another service. **A write filter therefore leaves
-the flag off, and then no policy, however it names those rows, can update or
-delete what the platform published.** The platform itself is unaffected: it owns
-those rows, so an ordinary `self` or concrete-tenant pattern binds them by tenant
-column. On a read mapping an `aic` allow selects nothing the marker does not
-already select, so it stays out of the clause and counts only as a grant on the
-table — a principal whose sole grant for the action is the platform's bound public
-policy reads the published rows and nothing else.
+The caller's `owner_id`/`id`/`status` filters live only inside their own group, so
+published rows are never narrowed by them (this matters on list endpoints). The
+marker widens an existing grant and never creates one: with no applicable allow for
+the action the clause is still `1=0`.
+
+Denies cannot reach published rows either, and that falls out of the grammar rather
+than being a separate rule — every pattern carries the caller's tenant, so every
+deny group contains `dataset.tenant_id = ?`, and a published row is the platform's.
+The marker is all-or-nothing by design; withholding the catalog from a principal
+means withholding the action.
+
+**A write mapping leaves `Published` unset, and the tenant column does the rest:**
+every pattern binds to the caller, so no policy — however it names those rows — can
+update or delete what the platform published. The platform is unaffected, because
+it owns them.
+
+On the single-resource path, set `Request.ResourcePublished` from the loaded row's
+marker; it satisfies the resource test of an allow whose action already matches, so
+`Decide` agrees with the filter.
 
 `TenantAnswered` remains the escape hatch for a projection whose tenant scoping
 is enforced outside the filter — it emits no tenant predicate at all. Use it only
@@ -316,44 +321,44 @@ A CRN names a resource:
 crn:{tenant}:{scope}:{service}:{region}:{type}:{resource}
 ```
 
-- `tenant` is a UUID (tenant isolation — never a wildcard), or one of the two
-reserved tokens `aic` (platform-owned) and `self` (the requesting tenant, in a
-pattern only — see below).
+- `tenant` is a UUID (tenant isolation — never a wildcard), or the reserved token
+`aic` standing for the requesting tenant, in a pattern only — see below.
 - `resource` is an S3-style relative path (no leading/trailing `/`); it may
 contain `:` since it is the final field.
 
-### The platform tenant — `aic`
+### The tenant token — `aic`
 
-The tenant position carries two reserved tokens with distinct meanings. `aic`
-(`crn.PlatformTenant`) names platform-owned resources; `self`
-(`crn.CallerTenant`) stands for the requesting tenant. Keeping them separate is
-what lets one platform-issued document grant every tenant read access to a
-shared table *without* also granting cross-tenant access to private rows.
+The tenant position carries exactly one reserved token, and it expresses tenancy
+only. `aic` (`crn.PlatformTenant`) stands for **the requesting tenant**, which is
+what lets the platform issue one document that every tenant binds to its own groups
+and that grants each of them their own resources. See
+[ADR 0001](docs/adr/0001-tenancy-and-published-rows.md).
 
-| pattern tenant  | `Decide` matches                             | `Constrain` keeps                              |
-| --------------- | -------------------------------------------- | ---------------------------------------------- |
-| concrete UUID   | resources of that tenant                     | only when it equals the request tenant         |
-| `aic`           | platform-owned resources only                | as-is, unrewritten, for the adapter            |
-| `self`          | resources whose tenant equals the caller's   | rewritten to the request tenant                |
+| pattern tenant | `Decide` matches                           | `Constrain` keeps                      |
+| -------------- | ------------------------------------------ | -------------------------------------- |
+| concrete UUID  | resources of that tenant                   | only when it equals the request tenant |
+| `aic`          | resources whose tenant equals the caller's | resolved to the request tenant         |
 
-- `self` is valid in a **resource pattern only**. A concrete CRN is a real
-resource identity, so `crn.Parse` rejects `self` there — an identity can't be
-"self".
-- `aic` is exact in both positions: a concrete `crn:aic:...` is a platform-owned
-resource, and an `aic` pattern matches only those platform-owned rows (never
-another tenant's).
+- Both paths enforce one invariant: **a policy can only reach resources of the
+tenant the request is made for.** A pattern naming another tenant is dropped before
+matching, so a concrete UUID is a deliberate grant that only that tenant's own
+requests can use.
+- `aic` is valid in a **resource pattern only**. A concrete CRN is a real resource
+identity whose tenant is a real tenant, so `crn.Parse` and `crn.Build` reject it.
+- There is deliberately **no token for platform-published rows.** Publication is
+the grant for those and it is a marker on the row — see `Mapping.Published` above.
 - The engine evaluates whatever policy set the caller binds to a principal;
-restricting who may *author* `crn:aic:...` or `crn:self:...` patterns is the
-responsibility of the policy management plane that issues and stores policies.
+restricting who may *author* `crn:aic:...` patterns is the responsibility of the
+policy management plane that issues and stores policies.
 
-Public visibility is then a single platform-issued statement, bound to every
-principal, and nothing else:
+A managed policy the platform authors once and every tenant binds to its own
+groups therefore looks like this — one document, no per-tenant copy:
 
 ```json
 {
-  "id": "aic-public-datasets",
+  "id": "ConfigFullAccess",
   "statements": [{
-    "sid": "aic-list-public-datasets",
+    "sid": "datasets",
     "effect": "allow",
     "actions": ["config:listDataset"],
     "resources": ["crn:aic:*:config::dataset:*"]
@@ -361,8 +366,8 @@ principal, and nothing else:
 }
 ```
 
-A caller's own grant uses `self`, which matches (and, at list time, is rewritten
-to) their own tenant:
+A concrete tenant UUID is for a grant deliberately scoped to one tenant, which
+only that tenant's own requests can use:
 
 ```json
 {
@@ -371,17 +376,16 @@ to) their own tenant:
     "sid": "own-datasets",
     "effect": "allow",
     "actions": ["config:listDataset"],
-    "resources": ["crn:self:*:config::dataset:*"]
+    "resources": ["crn:ba62a53f-afa9-427d-9d91-c7987bc5662e:*:config::dataset:*"]
   }]
 }
 ```
 
-For request gating, `Compiled.Decide` matches `self` against `Request.Tenant`
-(the caller's tenant, distinct from `Request.Resource.Tenant`, which owns the
-resource acted on). For list/query paths, `engine.Constrain` takes the
-requesting tenant, rewrites `self` to it, and keeps `aic` unrewritten so the
-adapter can bind it to the table's platform-owned id — adapters only ever see a
-concrete tenant or the `aic` token, and never interpret policy.
+For request gating, `Compiled.Decide` resolves `aic` against `Request.Tenant` (the
+caller's tenant, distinct from `Request.Resource.Tenant`, which owns the resource
+acted on). For list/query paths, `engine.Constrain` takes the requesting tenant and
+resolves `aic` to it — so adapters only ever see a concrete tenant equal to the
+request tenant, and never interpret policy.
 
 `crn.Parse` validates a serialized CRN; `crn.Build` constructs a canonical one
 (stripping leading/trailing slashes from the resource).

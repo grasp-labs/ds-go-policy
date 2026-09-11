@@ -103,30 +103,33 @@ func ParsePattern(s string) (Pattern, error)
 func (p Pattern) Matches(c CRN, requestTenant string) bool
 ```
 
-### Reserved tenant tokens — `aic` and `self`
+### The reserved tenant token — `aic`
 
-The tenant position carries two reserved tokens.
+The tenant position carries exactly one reserved token, and it expresses tenancy
+only. See [ADR 0001](adr/0001-tenancy-and-published-rows.md).
 
-`crn.PlatformTenant` (`"aic"`) names **platform-owned resources** in both
-positions: a concrete `crn:aic:...` is a platform-owned resource, and an `aic`
-pattern matches only platform-owned rows (never another tenant's). It is never
-rewritten.
+`crn.PlatformTenant` (`"aic"`) stands for **the requesting tenant**. It is valid
+in a pattern only — a concrete CRN is a real resource identity, whose tenant is a
+real tenant — so `crn.Parse` and `crn.Build` reject it. This is what lets the
+platform issue one document that every tenant binds to its own groups and that
+grants each of them their own resources.
 
-`crn.CallerTenant` (`"self"`) stands for **the requesting tenant** and is valid
-in a pattern only — a concrete CRN is a real identity, so `crn.Parse` rejects
-`self`. A `self` pattern matches resources whose tenant equals the caller's.
+| pattern tenant | `Decide` matches                           | `Constrain` keeps                      |
+| -------------- | ------------------------------------------ | -------------------------------------- |
+| concrete UUID  | resources of that tenant                   | only when it equals the request tenant |
+| `aic`          | resources whose tenant equals the caller's | resolved to the request tenant         |
 
-| pattern tenant | `Decide` matches                           | `Constrain` keeps                       |
-| -------------- | ------------------------------------------ | --------------------------------------- |
-| concrete UUID  | resources of that tenant                   | only when it equals the request tenant  |
-| `aic`          | platform-owned resources only              | as-is, unrewritten, for the adapter     |
-| `self`         | resources whose tenant equals the caller's | rewritten to the request tenant         |
+Both paths enforce one invariant: **a policy can only reach resources of the
+tenant the request is made for.** A pattern naming any other tenant is dropped
+before matching, so adapters only ever see the request tenant.
 
-The engine evaluates whatever policy set the caller binds to a principal —
-restricting who may author `aic`/`self` patterns is the policy management
-plane's responsibility. `Decide` matches `self` against `Request.Tenant`; for
-list/query paths `engine.Constrain` rewrites `self` to the requesting tenant and
-keeps `aic` for the adapter to bind to a platform-owned id.
+There is deliberately no token for platform-published rows. Publication is the
+grant for those, and it is a marker on the row — see `Mapping.Published` and
+`Request.ResourcePublished` below.
+
+The engine evaluates whatever policy set the caller binds to a principal;
+restricting who may author `aic` patterns is the policy management plane's
+responsibility.
 
 ## `engine/` — the security-critical core (two modes)
 
@@ -140,7 +143,8 @@ import "…/crn"
 type Request struct {
     Action   string            // concrete "{service}:{operation}"
     Resource crn.CRN
-    Tenant   string            // caller's tenant; matched by "self" patterns
+    Tenant   string            // caller's tenant, from verified claims; bounds every pattern
+    ResourcePublished bool     // the row carries the platform's published marker
     Context  map[string]string // attributes the service supplies for conditions
 }
 
@@ -169,10 +173,10 @@ type Constraints struct {
 }
 
 // Invalid policies or non-concrete actions return empty constraints.
-// tenant scopes the list/query; foreign-tenant patterns are dropped, a "self"
-// pattern is rewritten to it, and an "aic" pattern is kept unrewritten for the
-// adapter. context resolves known conditions up front; unresolved conditions
-// stay attached for the adapter.
+// tenant scopes the list/query: foreign-tenant patterns are dropped and an "aic"
+// pattern is resolved to it, so every emitted pattern carries this tenant.
+// context resolves known conditions up front; unresolved conditions stay
+// attached for the adapter.
 func Constrain(policies []policy.Policy, action, tenant string, context map[string]string) Constraints
 ```
 
@@ -194,7 +198,7 @@ type Mapping struct {
     Service                    string              // required table service; must not be "*"
     Tenant, Scope, Region, Type string              // column names (Scope -> owner_id/owners)
     TenantAnswered             bool                // tenant enforced outside the filter (escape hatch)
-    PublicRows                 bool                // reads: OR issuer = 'public'; also admits "aic" patterns
+    Published                  Published           // reads: marker column+value OR-ed onto the allow
     Fixed                      map[Segment]string  // per-table constants; use "" for an absent segment
     Resource                   ResourceColumn      // id column and/or path column
     Conditions                map[string]string   // residual condition key -> trusted column/expression
@@ -205,23 +209,32 @@ type Mapping struct {
 func Where(c engine.Constraints, m Mapping) (sql string, args []any, err error)
 ```
 
-`PublicRows` declares that the mapping reads a platform-published table: any
-principal already holding the action reads its published rows, no statement
-required. The fixed `issuer = 'public'` marker is OR-ed onto the allow clause —
-every platform-published table marks its rows by that convention, so no per-table
-configuration is needed — which widens an existing grant and never creates one (an
-empty allow still yields `1=0`). The caller's own id/condition filters stay inside
-the caller's group and never narrow published rows, and an `aic` deny still
-subtracts them.
+`Published` declares that the mapping reads a table the platform publishes rows
+into: any principal already holding the action reads those rows, no statement
+required. The marker is OR-ed onto the allow clause, so it widens an existing
+grant and never creates one — an empty allow still yields `1=0`, and a principal
+with no grant gets 403 rather than the catalog.
 
-The flag is also what admits an `aic` pattern at all. That pattern is the one
-shape which does not bind the mapping's tenant column, emitting the marker
-instead, so a mapping without the flag drops it as it drops a pattern for another
-tenant. **A write mapping leaves the flag off; no policy can then reach
-platform-published rows through a write filter.** The platform writes its own rows
-by ownership, through an ordinary `self` or concrete-tenant pattern. On a read
-mapping an `aic` allow adds nothing to the marker and stays out of the clause,
-counting only as a grant on the table.
+The column is per-table rather than a package constant so it can be qualified,
+which matters as soon as a query aliases or joins the table.
+
+The caller's own id and condition filters stay inside the caller's group and never
+narrow published rows. Denies cannot reach them either, and that follows from the
+grammar rather than being a separate rule: every pattern carries the caller's
+tenant, so every deny group contains `tenant = <caller>`, and a published row
+belongs to the platform. The marker is all-or-nothing by design — withholding the
+catalog from a principal means withholding the action. (`TenantAnswered` emits no
+tenant predicate and so lifts this; do not combine it with a published table.)
+
+**A write mapping leaves `Published` unset, and the tenant column does the rest:**
+every pattern is bound to the caller, and a published row is the platform's, so no
+policy shape reaches it. The platform edits its own published rows because it owns
+them.
+
+On the single-resource path, `Request.ResourcePublished` plays the same role: the
+service reads the marker off the loaded row, and it satisfies the resource test of
+an allow whose action already matches. Without it `Decide` would refuse a row that
+`Constrain` returns.
 
 > **Trust invariant — `issuer = 'public'` is trusted.** The filter authorizes a
 > row to every principal *because the row asserts `issuer = 'public'`*. It does
@@ -229,11 +242,12 @@ counting only as a grant on the table.
 > entirely on the write path, and every API that writes a platform-published
 > table **MUST GUARANTEE**:
 >
-> 1. Only the platform tenant can set `issuer = 'public'`. A request from any
->    other tenant that attempts to set it MUST be rejected. The write guard
->    should compare against `sqlfilter.PlatformIssuerColumn` /
->    `sqlfilter.PlatformIssuerPublic` (the same constants the read filter trusts)
->    so the two cannot drift.
+> 1. Only the platform tenant can set the marker. A request from any other tenant
+>    that attempts to set it MUST be rejected. The write guard should read the
+>    column and value from the same `sqlfilter.Published` the read mapping
+>    declares, so the two cannot drift, and it belongs in one central place — a
+>    single service that lets a tenant set the marker publishes that tenant's row
+>    to every other tenant.
 > 2. When `issuer = 'public'` is set, the row is platform-owned — its `tenant_id`
 >    (owner) is the platform tenant id.
 > 3. Neither field is writable after creation: an update preserves the stored
@@ -249,11 +263,8 @@ counting only as a grant on the table.
 > binding to `tenant_id = <platform id>` would move the trust to system-assigned
 > ownership, but requires the platform id to be configured per table.
 
-Two further constraints follow from the fixed predicate: every table that can
-receive an `aic` grant must have an `issuer` column (a missing column is a
-runtime error, fail-closed), and the marker column/value (`issuer` / `'public'`)
-is unqualified, so callers that alias or JOIN the table must keep `issuer`
-unambiguous.
+One further constraint: a mapping that sets `Published` must name a column the
+table actually has, since a missing column is a runtime error (fail-closed).
 
 `TenantAnswered` is the escape hatch for a projection whose tenant scoping is
 enforced outside the filter: it emits no tenant predicate and is safe only when

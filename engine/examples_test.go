@@ -69,7 +69,7 @@ func TestExample_FileAccess(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			req := engine.Request{Action: test.action, Resource: file(test.path), Context: test.ctx}
+			req := engine.Request{Action: test.action, Resource: file(test.path), Tenant: tenant, Context: test.ctx}
 			got := engine.Decide([]policy.Policy{pol}, req)
 			if got.Allowed != test.wantAllow || got.Reason != test.wantReason {
 				t.Errorf("Decide(%s %s) = {Allowed:%v Reason:%q}, want {Allowed:%v Reason:%q}",
@@ -80,9 +80,9 @@ func TestExample_FileAccess(t *testing.T) {
 }
 
 // TestExample_PlatformGuardrail exercises docs/examples/platform-guardrail.json:
-// a platform-issued policy whose deny uses the "self" token, so the one document
-// guards each principal's own resources, layered on top of the tenant's own
-// file-access policy.
+// a platform-issued policy whose deny carries the tenant token, so the one
+// document guards each principal's own resources, layered on top of the tenant's
+// own file-access policy.
 func TestExample_PlatformGuardrail(t *testing.T) {
 	guardrail := loadPolicy(t, "platform-guardrail.json")
 	tenantPol := loadPolicy(t, "file-access.json")
@@ -107,17 +107,17 @@ func TestExample_PlatformGuardrail(t *testing.T) {
 	// The guardrail denies a path the tenant policy would otherwise allow.
 	got = engine.Decide(policies, engine.Request{
 		Action: "file:getFile", Resource: file(tenant, "team/secrets/token.txt"), Tenant: tenant, Context: activeCtx})
-	if got.Allowed || got.Reason != "aic-protect-secrets" {
-		t.Errorf("under guardrail = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)
+	if got.Allowed || got.Reason != "protect-secrets" {
+		t.Errorf("under guardrail = {Allowed:%v Reason:%q}, want deny via protect-secrets", got.Allowed, got.Reason)
 	}
 
 	// The same document, bound to a different principal, guards that principal's
-	// own resources too — "self" resolves to whoever the caller is.
+	// own resources too — the token resolves to whoever the caller is.
 	other := "11111111-1111-1111-1111-111111111111"
 	got = engine.Decide([]policy.Policy{guardrail}, engine.Request{
 		Action: "file:getFile", Resource: file(other, "x/secrets/y"), Tenant: other})
-	if got.Allowed || got.Reason != "aic-protect-secrets" {
-		t.Errorf("other principal = {Allowed:%v Reason:%q}, want deny via aic-protect-secrets", got.Allowed, got.Reason)
+	if got.Allowed || got.Reason != "protect-secrets" {
+		t.Errorf("other principal = {Allowed:%v Reason:%q}, want deny via protect-secrets", got.Allowed, got.Reason)
 	}
 }
 
@@ -150,7 +150,7 @@ func TestExample_InboundPartitions(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := engine.Decide([]policy.Policy{pol},
-				engine.Request{Action: "file:getFile", Resource: file(test.path)})
+				engine.Request{Action: "file:getFile", Resource: file(test.path), Tenant: tenant})
 			if got.Allowed != test.wantAllow || got.Reason != test.wantReason {
 				t.Errorf("Decide(%s) = {Allowed:%v Reason:%q}, want {Allowed:%v Reason:%q}",
 					test.path, got.Allowed, got.Reason, test.wantAllow, test.wantReason)
@@ -201,7 +201,7 @@ func TestExample_InboundCountry(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := engine.Decide([]policy.Policy{pol},
-				engine.Request{Action: "file:getFile", Resource: file("files/inbound/report.csv"), Context: test.ctx})
+				engine.Request{Action: "file:getFile", Resource: file("files/inbound/report.csv"), Tenant: tenant, Context: test.ctx})
 			if got.Allowed != test.wantAllow || got.Reason != test.wantReason {
 				t.Errorf("Decide = {Allowed:%v Reason:%q}, want {Allowed:%v Reason:%q}",
 					got.Allowed, got.Reason, test.wantAllow, test.wantReason)
@@ -243,7 +243,7 @@ func TestExample_ConfigBilling(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			req := engine.Request{Action: test.action, Resource: res(test.kind), Context: test.ctx}
+			req := engine.Request{Action: test.action, Resource: res(test.kind), Tenant: tenant, Context: test.ctx}
 			got := engine.Decide([]policy.Policy{pol}, req)
 			if got.Allowed != test.wantAllow || got.Reason != test.wantReason {
 				t.Errorf("Decide(%s %s) = {Allowed:%v Reason:%q}, want {Allowed:%v Reason:%q}",
@@ -253,26 +253,26 @@ func TestExample_ConfigBilling(t *testing.T) {
 	}
 }
 
-// TestExample_SingleResourceAndPublic composes two SEPARATE documents:
-//   - dataset-owner-grant.json: the caller's own grant to one of its datasets.
-//   - platform-public-datasets.json: a single platform-issued grant to public
-//     ("aic") datasets, bound to every principal by the IAM binding layer — it
-//     is authored once, never copied into each user's policy.
+// TestExample_SingleResourceAndPublished shows the two ways a row becomes
+// readable, and that only one of them is a policy:
+//   - dataset-owner-grant.json grants the caller one of its own datasets.
+//   - the platform's published rows come from the marker the service declares on
+//     its read mapping, so no document names them and none has to be copied per
+//     tenant.
 //
-// The engine composes whatever policy set the caller resolves for the principal,
-// so listing returns exactly the caller's own dataset OR every public
-// (platform-owned) dataset — and nothing from another tenant.
-func TestExample_SingleResourceAndPublic(t *testing.T) {
-	ownPol := loadPolicy(t, "dataset-owner-grant.json")
-	publicPol := loadPolicy(t, "platform-public-datasets.json")
-	// The binding layer attaches the shared public policy to this principal
-	// alongside its own grants; the same publicPol is bound to every principal.
-	policies := []policy.Policy{ownPol, publicPol}
+// Listing therefore returns the caller's granted dataset OR every published row,
+// and nothing belonging to another tenant.
+func TestExample_SingleResourceAndPublished(t *testing.T) {
+	// One narrow grant, naming a single dataset. Nothing in it mentions the
+	// platform's published rows: publication is the grant for those, and the
+	// service declares the marker on its read mapping.
+	policies := []policy.Policy{loadPolicy(t, "dataset-owner-grant.json")}
 
 	const (
-		ownID    = "11111111-1111-1111-1111-111111111111"
-		otherID  = "22222222-2222-2222-2222-222222222222"
-		otherTen = "99999999-9999-9999-9999-999999999999"
+		ownID          = "11111111-1111-1111-1111-111111111111"
+		otherID        = "22222222-2222-2222-2222-222222222222"
+		otherTen       = "99999999-9999-9999-9999-999999999999"
+		platformTenant = "88888888-8888-8888-8888-888888888888"
 	)
 	dataset := func(tenantID, id string) crn.CRN {
 		c, err := crn.Build(tenantID, "", "config", "", "dataset", id)
@@ -286,17 +286,23 @@ func TestExample_SingleResourceAndPublic(t *testing.T) {
 	decideCases := []struct {
 		name      string
 		resource  crn.CRN
+		published bool
 		wantAllow bool
 	}{
-		{"own granted dataset", dataset(tenant, ownID), true},
-		{"a public/platform dataset", dataset(crn.PlatformTenant, "any-public-id"), true},
-		{"own but ungranted dataset", dataset(tenant, otherID), false},
-		{"another tenant's dataset", dataset(otherTen, ownID), false},
+		{"own granted dataset", dataset(tenant, ownID), false, true},
+		// The row carries the platform's marker, so holding the action is enough and
+		// the narrow grant above does not have to name it.
+		{"a published dataset", dataset(platformTenant, "any-published-id"), true, true},
+		{"own but ungranted dataset", dataset(tenant, otherID), false, false},
+		{"another tenant's dataset", dataset(otherTen, ownID), false, false},
+		// Unmarked, so it is an ordinary row of a tenant that is not the caller.
+		{"the platform's unpublished dataset", dataset(platformTenant, ownID), false, false},
 	}
 	for _, tc := range decideCases {
 		t.Run("decide/"+tc.name, func(t *testing.T) {
 			got := engine.Decide(policies, engine.Request{
-				Action: "config:getDataset", Tenant: tenant, Resource: tc.resource})
+				Action: "config:getDataset", Tenant: tenant,
+				Resource: tc.resource, ResourcePublished: tc.published})
 			if got.Allowed != tc.wantAllow {
 				t.Errorf("Decide = {Allowed:%v Reason:%q}, want allow=%v", got.Allowed, got.Reason, tc.wantAllow)
 			}
@@ -308,9 +314,9 @@ func TestExample_SingleResourceAndPublic(t *testing.T) {
 	cons := engine.Constrain(policies, "config:listDataset", tenant, nil)
 
 	where, args, err := sqlfilter.Where(cons, sqlfilter.Mapping{
-		Service:    "config",
-		Tenant:     "tenant_id",
-		PublicRows: true,
+		Service:   "config",
+		Tenant:    "tenant_id",
+		Published: sqlfilter.Published{Column: "issuer", Value: "public"},
 		Fixed: map[sqlfilter.Segment]string{
 			sqlfilter.SegmentScope:  "",
 			sqlfilter.SegmentRegion: "",
@@ -322,16 +328,14 @@ func TestExample_SingleResourceAndPublic(t *testing.T) {
 		t.Fatalf("Where: %v", err)
 	}
 
-	// Own row bound to the request tenant + granted id; public rows marked by the
-	// fixed issuer = 'public' convention — never the literal "aic" token. The
-	// marker comes from the mapping's PublicRows, which is also what admits the
-	// bound public policy's "aic" pattern: a mapping without it (a write filter)
-	// would drop that pattern and select the caller's row alone.
-	wantWhere := "(tenant_id = ? AND id = ?) OR issuer = 'public'"
+	// Own row bound to the request tenant and the granted id; published rows
+	// through the marker the mapping declares, which no statement names. A write
+	// mapping leaves Published unset and selects the caller's row alone.
+	wantWhere := "(tenant_id = ? AND id = ?) OR issuer = ?"
 	if where != wantWhere {
 		t.Errorf("where =\n  %q\nwant\n  %q", where, wantWhere)
 	}
-	if wantArgs := []any{tenant, ownID}; !reflect.DeepEqual(args, wantArgs) {
+	if wantArgs := []any{tenant, ownID, "public"}; !reflect.DeepEqual(args, wantArgs) {
 		t.Errorf("args = %#v, want %#v", args, wantArgs)
 	}
 }
