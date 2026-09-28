@@ -114,6 +114,8 @@ func TestMatches(t *testing.T) {
 		{"scope wildcard", "datalake", "datalake", "other-scope", true}, // scope is "*" in pattern below
 		{"recursive deep", "datalake/**", "datalake/raw/events", scope, true},
 		{"recursive zero", "datalake/**", "datalake", scope, true},
+		{"broad allow matches a literal ** directory", `reports/**`, `reports/private/**/secret.txt`, scope, true},
+		{"private deny matches a literal ** directory", `reports/private/**`, `reports/private/**/secret.txt`, scope, true},
 		{"single one segment", "datalake/*", "datalake/raw", scope, true},
 		{"single too deep", "datalake/*", "datalake/raw/events", scope, false},
 		{"literal mismatch", "datalake", "other", scope, false},
@@ -238,5 +240,164 @@ func TestMatchPath(t *testing.T) {
 		if res != test.want {
 			t.Errorf("matchPath(%v, %v) = %v, want %v", test.pat, test.seg, res, test.want)
 		}
+	}
+}
+
+func TestMatchPathWildcards(t *testing.T) {
+	tests := []struct {
+		name      string
+		pattern   string
+		resource  string
+		wantMatch bool
+	}{
+		// Regression: a literal ** segment must not disable recursive matching.
+		{
+			name:      "recursive wildcard matches a literal ** directory",
+			pattern:   `reports/private/**`,
+			resource:  `reports/private/**/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "recursive wildcard matches a literal ** directory at the root",
+			pattern:   `**`,
+			resource:  `**/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "recursive wildcard matches a literal ** directory before a filename",
+			pattern:   `reports/**/secret.txt`,
+			resource:  `reports/**/nested/secret.txt`,
+			wantMatch: true,
+		},
+
+		// Recursive matching: backtracking, suffixes, and zero segments.
+		{
+			name:      "recursive wildcard backtracks after a literal ** directory",
+			pattern:   `reports/**/draft/secret.txt`,
+			resource:  `reports/**/draft/old/draft/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "recursive wildcard still requires the filename to match",
+			pattern:   `reports/**/secret.txt`,
+			resource:  `reports/**/public.txt`,
+			wantMatch: false,
+		},
+		{
+			name:      "recursive wildcard matches zero segments at the end",
+			pattern:   `reports/private/**`,
+			resource:  `reports/private`,
+			wantMatch: true,
+		},
+		{
+			name:      "recursive wildcard matches zero segments before a filename",
+			pattern:   `reports/**/secret.txt`,
+			resource:  `reports/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "recursive wildcard matches zero segments at the start",
+			pattern:   `**/secret.txt`,
+			resource:  `secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "consecutive recursive wildcards match a literal ** directory",
+			pattern:   `reports/**/**/secret.txt`,
+			resource:  `reports/**/nested/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "consecutive recursive wildcards match zero segments",
+			pattern:   `reports/**/**/secret.txt`,
+			resource:  `reports/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "separated recursive wildcards match literal ** directories",
+			pattern:   `reports/**/private/**/secret.txt`,
+			resource:  `reports/**/private/**/nested/secret.txt`,
+			wantMatch: true,
+		},
+
+		// A single wildcard matches exactly one segment.
+		{
+			name:      "single wildcard matches a literal * directory",
+			pattern:   `reports/*/secret.txt`,
+			resource:  `reports/*/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "single wildcard matches a literal ** directory",
+			pattern:   `reports/*/secret.txt`,
+			resource:  `reports/**/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "single wildcard cannot span multiple segments",
+			pattern:   `reports/*/secret.txt`,
+			resource:  `reports/**/nested/secret.txt`,
+			wantMatch: false,
+		},
+		{
+			name:      "single wildcard cannot match zero segments",
+			pattern:   `reports/*/secret.txt`,
+			resource:  `reports/secret.txt`,
+			wantMatch: false,
+		},
+
+		// Concrete segments are raw data: wildcard tokens, empty segments, and dots.
+		{
+			name:      "a concrete * segment does not act as a wildcard",
+			pattern:   `reports/private/secret.txt`,
+			resource:  `reports/*/secret.txt`,
+			wantMatch: false,
+		},
+		{
+			name:      "a concrete ** segment does not act as a wildcard",
+			pattern:   `reports/private/secret.txt`,
+			resource:  `reports/**/secret.txt`,
+			wantMatch: false,
+		},
+		{
+			name:      "single wildcard matches an empty segment",
+			pattern:   `reports/*/secret.txt`,
+			resource:  `reports//secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "recursive wildcard matches empty and literal ** segments",
+			pattern:   `reports/**/secret.txt`,
+			resource:  `reports//**/secret.txt`,
+			wantMatch: true,
+		},
+		{
+			name:      "empty segments are preserved",
+			pattern:   `reports/secret.txt`,
+			resource:  `reports//secret.txt`,
+			wantMatch: false,
+		},
+		{
+			name:      "dot segments are preserved",
+			pattern:   `reports/secret.txt`,
+			resource:  `reports/./secret.txt`,
+			wantMatch: false,
+		},
+		{
+			name:      "parent segments are preserved",
+			pattern:   `reports/secret.txt`,
+			resource:  `reports/private/../secret.txt`,
+			wantMatch: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			patternSegments := strings.Split(test.pattern, "/")
+			resourceSegments := strings.Split(test.resource, "/")
+			if got := matchPath(patternSegments, resourceSegments); got != test.wantMatch {
+				t.Errorf("matchPath(%q, %q) = %v, want %v", test.pattern, test.resource, got, test.wantMatch)
+			}
+		})
 	}
 }

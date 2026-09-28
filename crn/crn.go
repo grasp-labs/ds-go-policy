@@ -237,7 +237,7 @@ func matchField(pat, val string) bool {
 //
 // Parameters
 // - pat: pat []string — the pattern path segments (may contain the wildcard tokens * and **). E.g. resource "projectx/*/config" → ["projectx", "*", "config"].
-// - seg []string — the concrete resource path segments (literal, no wildcards). E.g. "projectx/db/config" → ["projectx", "db", "config"].
+// - seg []string — the concrete resource path segments (always literal, including "*" and "**"). E.g. "projectx/db/config" → ["projectx", "db", "config"].
 //
 // Pat is as such the pattern saved to the policy engine, while seg is the actual resource path.
 // Returns: true if the segment matches the pattern
@@ -246,11 +246,12 @@ func matchPath(pat, seg []string) bool {
 	starPx, starSx := -1, -1
 	for sx < len(seg) {
 		switch {
-		case px < len(pat) && (pat[px] == "*" || pat[px] == seg[sx]):
-			px, sx = px+1, sx+1
 		case px < len(pat) && pat[px] == "**":
+			// Record the recursive wildcard even when the concrete segment is "**".
 			starPx, starSx = px, sx
 			px++
+		case px < len(pat) && (pat[px] == "*" || pat[px] == seg[sx]):
+			px, sx = px+1, sx+1
 		case starPx != -1:
 			px = starPx + 1
 			starSx++

@@ -60,6 +60,65 @@ func TestWhere_AllowMinusDeny(t *testing.T) {
 	}
 }
 
+func TestWhere_LiteralDeepWildcardDenied(t *testing.T) {
+	const action = "file:getFile"
+	policies := []policy.Policy{{Statements: []policy.Statement{
+		{
+			Sid:       "allow-reports",
+			Effect:    policy.Allow,
+			Actions:   []string{action},
+			Resources: []string{fmt.Sprintf("crn:%s:*:file:*:file:reports/**", tenant)},
+		},
+		{
+			Sid:       "deny-private",
+			Effect:    policy.Deny,
+			Actions:   []string{action},
+			Resources: []string{fmt.Sprintf("crn:%s:*:file:*:file:reports/private/**", tenant)},
+		},
+	}}}
+	compiled, err := engine.Compile(policies)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	resource, err := crn.Parse(fmt.Sprintf("crn:%s::file::file:reports/private/**/secret.txt", tenant))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	t.Run("SQL retains the private-path deny predicate", func(t *testing.T) {
+		where, args, err := sqlfilter.Where(compiled.Constrain(action, tenant, nil), mapping())
+		if err != nil {
+			t.Fatalf("Where: %v", err)
+		}
+		// The literal ** in the stored path is covered by reports/private/%.
+		wantSQL := `(tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\')) ` +
+			`AND ((tenant_id = ? AND type = ? AND (path = ? OR path LIKE ? ESCAPE '\')) IS NOT TRUE)`
+		wantArgs := []any{
+			// Allow reports and its descendants.
+			tenant, "file", "reports", "reports/%",
+			// Deny reports/private and its descendants.
+			tenant, "file", "reports/private", "reports/private/%",
+		}
+		if where != wantSQL {
+			t.Errorf("sql = %q, want %q", where, wantSQL)
+		}
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Errorf("args = %#v, want %#v", args, wantArgs)
+		}
+	})
+
+	t.Run("point authorization returns the explicit deny", func(t *testing.T) {
+		decision := compiled.Decide(engine.Request{
+			Action:   action,
+			Resource: resource,
+			Tenant:   tenant,
+		})
+		if decision.Allowed || decision.Reason != "deny-private" {
+			t.Errorf("Decide = %+v, want explicit deny from deny-private", decision)
+		}
+	})
+}
+
 func TestWhere_DenyConditionMatchesOnlyTrue(t *testing.T) {
 	wholeCollection, err := crn.ParsePattern(fmt.Sprintf("crn:%s:*:file:*:file:**", tenant))
 	if err != nil {
