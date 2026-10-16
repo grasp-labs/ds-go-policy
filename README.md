@@ -125,6 +125,21 @@ statement whose context condition fails is dropped.
 `sqlfilter.Mapping.Service` is required and identifies the table's resource
 service.
 
+For PostgreSQL, `sqlfilter.WithPostgresPathConditions(mapping, constraints, pathColumn)`
+maps residual `resource.path[N]` conditions from allows and denies to zero-based
+segments of a trusted SQL column. For example:
+
+```go
+mapping = sqlfilter.WithPostgresPathConditions(mapping, cons, "file.file_path")
+where, args, err := sqlfilter.Where(cons, mapping)
+```
+
+The helper copies condition mappings, preserves explicit entries, and enables only
+`StringEquals` for new keys. Missing segments are SQL `NULL`; present empty segments
+are empty strings, including segment zero of an empty path. It adds no database
+driver dependency. The path column is explicit because it can differ from the
+resource ID column, such as a state row's `key`.
+
 Take the file-access policy from [`docs/examples/file-access.json`](./docs/examples/file-access.json):
 it allows `file:listFiles` over the whole tree where `status` is `"active"` or
 `"archived"` (a key's values OR together), and denies everything under
